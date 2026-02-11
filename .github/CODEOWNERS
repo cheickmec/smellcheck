@@ -1,0 +1,5 @@
+# Default owner for everything in the repo
+* @cheickmec
+
+# Core detector -- changes here need careful review
+src/smellcheck/detector.py @cheickmec
