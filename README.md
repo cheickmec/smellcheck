@@ -1,6 +1,19 @@
-# smellcheck -- Python Code Smell Detector & Refactoring Guide
+<p align="center">
+  <img src="assets/logo.png" alt="smellcheck logo" width="200">
+</p>
 
-> Static analysis for Python code quality -- 82 refactoring patterns, 55 automated AST checks, zero dependencies.
+<h1 align="center">smellcheck</h1>
+
+<p align="center">
+  <strong>Python Code Smell Detector & Refactoring Guide</strong><br>
+  82 refactoring patterns &middot; 55 automated AST checks &middot; zero dependencies
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/smellcheck/"><img src="https://img.shields.io/pypi/v/smellcheck" alt="PyPI"></a>
+  <a href="https://pypi.org/project/smellcheck/"><img src="https://img.shields.io/pypi/pyversions/smellcheck" alt="Python"></a>
+  <a href="https://github.com/cheickmec/smellcheck/blob/main/LICENSE"><img src="https://img.shields.io/github/license/cheickmec/smellcheck" alt="License"></a>
+</p>
 
 **smellcheck** is a Python code smell detector and refactoring catalog. It works as a pip-installable CLI, GitHub Action, pre-commit hook, or [Agent Skills](https://agentskills.io) plugin for AI coding assistants.
 
