@@ -40,8 +40,9 @@ requests, discussions, and any other communication channel associated with the p
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported
-to the project maintainer at **cheick@example.com**. All complaints will be reviewed
-and investigated promptly and fairly.
+by [opening a GitHub issue](https://github.com/cheickmec/smellcheck/issues) or
+contacting the maintainer through their [GitHub profile](https://github.com/cheickmec).
+All complaints will be reviewed and investigated promptly and fairly.
 
 ## Attribution
 

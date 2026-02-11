@@ -23,7 +23,7 @@ The attack surface is limited to:
 
 If you discover a security issue, please **do not** open a public GitHub issue.
 
-Instead, email **cheick@example.com** with:
+Instead, [open a private security advisory](https://github.com/cheickmec/smellcheck/security/advisories/new) with:
 
 1. A description of the vulnerability
 2. Steps to reproduce
