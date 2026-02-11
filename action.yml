@@ -1,0 +1,45 @@
+name: 'smellcheck'
+description: 'Python code smell detector -- 55 AST checks, 82 refactoring patterns'
+branding:
+  icon: 'search'
+  color: 'yellow'
+
+inputs:
+  paths:
+    description: 'Space-separated paths to scan'
+    required: false
+    default: '.'
+  fail-on:
+    description: 'Exit 1 on findings at or above this severity: info | warning | error'
+    required: false
+    default: 'error'
+  min-severity:
+    description: 'Only display findings at or above this severity: info | warning | error'
+    required: false
+    default: 'info'
+  format:
+    description: 'Output format: text | json | github'
+    required: false
+    default: 'github'
+  python-version:
+    description: 'Python version to use'
+    required: false
+    default: '3.12'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install smellcheck
+      shell: bash
+      run: pip install "$GITHUB_ACTION_PATH"
+    - name: Run smellcheck
+      shell: bash
+      run: |
+        smellcheck ${{ inputs.paths }} \
+          --format ${{ inputs.format }} \
+          --fail-on ${{ inputs.fail-on }} \
+          --min-severity ${{ inputs.min-severity }}

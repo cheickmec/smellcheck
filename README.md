@@ -2,19 +2,43 @@
 
 > Static analysis for Python code quality -- 82 refactoring patterns, 55 automated AST checks, zero dependencies.
 
-**smellcheck** is a standalone Python code smell detector and refactoring catalog that works as an [Agent Skills](https://agentskills.io) plugin for AI coding assistants (Claude Code, OpenAI Codex CLI, Cursor, GitHub Copilot, Gemini CLI, Roo Code) or as a standalone CLI tool.
+**smellcheck** is a Python code smell detector and refactoring catalog. It works as a pip-installable CLI, GitHub Action, pre-commit hook, or [Agent Skills](https://agentskills.io) plugin for AI coding assistants.
 
-**No dependencies.** Pure Python stdlib (`ast`, `pathlib`, `json`). Runs anywhere Python runs.
-
-## Features
-
-- **55 automated smell checks** -- per-file AST analysis, cross-file dependency analysis, and OO metrics
-- **82 refactoring patterns** -- numbered catalog with before/after examples, trade-offs, and severity levels
-- **Zero dependencies** -- stdlib-only, single-file detector, runs on any Python 3.10+ installation
-- **Cross-platform** -- works as an Agent Skills plugin or standalone CLI tool
-- **JSON output** -- machine-readable results for CI/CD integration
+**No dependencies.** Pure Python stdlib (`ast`, `pathlib`, `json`). Runs anywhere Python 3.10+ runs.
 
 ## Installation
+
+### pip
+
+```bash
+pip install smellcheck
+
+smellcheck src/
+smellcheck myfile.py --format json
+smellcheck src/ --min-severity warning --fail-on warning
+```
+
+### GitHub Action
+
+```yaml
+- uses: cheickmec/smellcheck@v1
+  with:
+    paths: 'src/'
+    fail-on: 'error'       # exit 1 on error-level findings (default)
+    min-severity: 'info'   # display all findings (default)
+    format: 'github'       # GitHub annotations (default)
+```
+
+### pre-commit
+
+```yaml
+repos:
+  - repo: https://github.com/cheickmec/smellcheck
+    rev: v0.2.0
+    hooks:
+      - id: smellcheck
+        args: ['--fail-on', 'warning']
+```
 
 ### Agent Skills (Claude Code, Codex CLI, Cursor, Copilot, Roo Code, Gemini CLI)
 
@@ -36,35 +60,79 @@ git clone https://github.com/cheickmec/smellcheck.git
 # Point your tool to plugins/python-refactoring/skills/python-refactoring/
 ```
 
-### Standalone (any editor, any workflow)
-
-The detector is a single Python file with zero dependencies (stdlib only -- `ast`, `pathlib`, `json`, `collections`, `re`). No installation needed.
-
-```bash
-# The script lives at:
-DETECT=plugins/python-refactoring/skills/python-refactoring/scripts/detect_smells.py
-
-# Scan a directory
-python $DETECT src/
-
-# Scan a single file
-python $DETECT myfile.py
-
-# JSON output
-python $DETECT src/ --json
-
-# Filter by severity
-python $DETECT src/ --min-severity warning
-```
-
-Or copy `detect_smells.py` anywhere and run it directly -- it has no imports beyond stdlib.
-
 ### Manual setup for other tools
 
 For tools without Agent Skills support (Aider, Windsurf, Continue.dev, Amazon Q), copy the relevant files into your project's instruction directory:
 
 - Copy `SKILL.md` content into your tool's instruction file (`.cursorrules`, `CONVENTIONS.md`, `.windsurf/rules/`, etc.)
-- Place `detect_smells.py` anywhere in your project and run it directly
+- Install with `pip install smellcheck` and run the `smellcheck` CLI
+
+## Usage
+
+```bash
+# Scan a directory
+smellcheck src/
+
+# Scan multiple files
+smellcheck file1.py file2.py
+
+# JSON output
+smellcheck src/ --format json
+
+# GitHub Actions annotations
+smellcheck src/ --format github
+
+# Filter by severity
+smellcheck src/ --min-severity warning
+
+# Control exit code
+smellcheck src/ --fail-on warning   # exit 1 on warning or error
+smellcheck src/ --fail-on info      # exit 1 on any finding
+
+# Run only specific checks
+smellcheck src/ --select 001,057,CC
+
+# Skip specific checks
+smellcheck src/ --ignore 003,006
+
+# Module execution
+python -m smellcheck src/
+```
+
+## Configuration
+
+smellcheck reads `[tool.smellcheck]` from the nearest `pyproject.toml`:
+
+```toml
+[tool.smellcheck]
+select = ["001", "002", "057"]       # only run these checks (default: all)
+ignore = ["003", "006"]              # skip these checks
+per-file-ignores = {"tests/*" = ["002", "034"]}  # per-path overrides
+fail-on = "warning"                  # override default fail-on
+format = "text"                      # override default format
+```
+
+CLI flags override config values.
+
+## Inline Suppression
+
+Add `# noqa: SC057` to a line to suppress pattern #057 on that line:
+
+```python
+def foo(x=[]):  # noqa: SC057
+    return x
+```
+
+Use `# noqa` (no codes) to suppress all findings on that line. Multiple codes: `# noqa: SC003,SC006`
+
+## Features
+
+- **55 automated smell checks** -- per-file AST analysis, cross-file dependency analysis, and OO metrics
+- **82 refactoring patterns** -- numbered catalog with before/after examples, trade-offs, and severity levels
+- **Zero dependencies** -- stdlib-only, runs on any Python 3.10+ installation
+- **Multiple output formats** -- text (terminal), JSON (machine-readable), GitHub annotations (CI)
+- **Configurable** -- pyproject.toml config, inline suppression, CLI overrides
+- **Four distribution channels** -- pip, GitHub Action, pre-commit, Agent Skills
 
 ## Detected Patterns
 
@@ -157,6 +225,9 @@ Each pattern includes a description, before/after code examples, and trade-offs:
 
 | Tool | Install Method | Status |
 |------|---------------|--------|
+| pip | `pip install smellcheck` | Native support |
+| GitHub Actions | `uses: cheickmec/smellcheck@v1` | Native support |
+| pre-commit | `.pre-commit-config.yaml` | Native support |
 | Claude Code | `/plugin install` | Native support |
 | OpenAI Codex CLI | `$skill-installer` | Native support |
 | Cursor | GitHub import / `.cursor/skills/` | Native support |
@@ -167,7 +238,6 @@ Each pattern includes a description, before/after code examples, and trade-offs:
 | Aider | `--read CONVENTIONS.md` | Manual |
 | Continue.dev | `.continue/rules/` | Manual |
 | Amazon Q | `.amazonq/rules/` | Manual |
-| Any tool | `python plugins/python-refactoring/skills/python-refactoring/scripts/detect_smells.py src/` | Standalone |
 
 ## How It Compares
 
@@ -179,11 +249,25 @@ Each pattern includes a description, before/after code examples, and trade-offs:
 | Python-specific idioms | Yes | No | No | No |
 | Cross-file analysis | Yes | Limited | Yes | No |
 | OO metrics | 6 | 19 | 0 | 1 |
-| AI coding tool integration | Agent Skills standard | No | No | No |
+| Distribution channels | 4 (pip, GHA, pre-commit, Agent Skills) | 1 | 1 | 1 |
 
 ## Contributing
 
-Contributions welcome. The detector is a single file (`detect_smells.py`) -- add new checks by extending the `SmellDetector` AST visitor class and adding a cross-file analysis function if needed.
+Contributions welcome. The core detector is `src/smellcheck/detector.py` -- add new checks by extending the `SmellDetector` AST visitor class and adding a cross-file analysis function if needed.
+
+```bash
+# Development setup
+git clone https://github.com/cheickmec/smellcheck.git
+cd smellcheck
+pip install -e .
+pip install pytest
+
+# Run tests
+pytest tests/ -v
+
+# Self-check
+smellcheck src/smellcheck/
+```
 
 ## License
 

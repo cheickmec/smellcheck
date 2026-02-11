@@ -109,10 +109,16 @@ Load **only** the file(s) matching detected smells:
 
 `scripts/detect_smells.py` -- stdlib-only AST walker that programmatically detects 55 patterns (40 per-file + 10 cross-file + 5 OO metrics).
 
+If `smellcheck` is pip-installed, the `smellcheck` CLI is also available:
+
 ```bash
-python scripts/detect_smells.py src/              # scan directory
-python scripts/detect_smells.py myfile.py --json   # JSON output
-python scripts/detect_smells.py src/ --min-severity warning  # filter noise
+# Via Agent Skills shim (always works)
+python scripts/detect_smells.py src/
+python scripts/detect_smells.py myfile.py --format json
+
+# Via pip-installed CLI (if available)
+smellcheck src/
+smellcheck src/ --min-severity warning --fail-on warning
 ```
 
 **Per-file detections** (40): #001 setters, #002 long functions, #003 magic numbers, #004 bare except, #006 generic names, #007 extract class, #008 UPPER_CASE without Final, #009 public attrs, #014 isinstance chains, #016 half-built objects, #017 boolean flags, #018 singleton, #021 dead code after return, #024 global mutables, #026 input() in logic, #028 sequential IDs, #029 return None|list, #033 excessive decorators, #034 too many params, #036 string concatenation, #039 deep nesting, #040 loop+append, #041 CQS violation, #042 complex booleans, #051 error codes, #054 Law of Demeter, #055 control flags, #057 mutable defaults, #058 open without with, #061 dataclass candidate, #062 sequential indexing, #063 contextlib candidate, #CC cyclomatic complexity, #064 unused parameters, #065 empty catch block, #066 long lambda, #067 complex comprehension, #068 missing else, #069 lazy class, #070 temporary field.

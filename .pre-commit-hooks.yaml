@@ -1,0 +1,7 @@
+- id: smellcheck
+  name: smellcheck
+  description: 'Python code smell detector (55 AST checks, 82 refactoring patterns)'
+  entry: smellcheck
+  language: python
+  types: [python]
+  require_serial: false
