@@ -1,8 +1,8 @@
-# pysmells -- Python Code Smell Detector & Refactoring Guide
+# smellcheck -- Python Code Smell Detector & Refactoring Guide
 
 > Static analysis for Python code quality -- 82 refactoring patterns, 55 automated AST checks, zero dependencies.
 
-**pysmells** is a standalone Python code smell detector and refactoring catalog that works as an [Agent Skills](https://agentskills.io) plugin for AI coding assistants (Claude Code, OpenAI Codex CLI, Cursor, GitHub Copilot, Gemini CLI, Roo Code) or as a standalone CLI tool.
+**smellcheck** is a standalone Python code smell detector and refactoring catalog that works as an [Agent Skills](https://agentskills.io) plugin for AI coding assistants (Claude Code, OpenAI Codex CLI, Cursor, GitHub Copilot, Gemini CLI, Roo Code) or as a standalone CLI tool.
 
 **No dependencies.** Pure Python stdlib (`ast`, `pathlib`, `json`). Runs anywhere Python runs.
 
@@ -22,17 +22,17 @@ Any tool supporting the Agent Skills standard can install directly:
 
 ```bash
 # Claude Code
-/plugin marketplace add cheickmec/pysmells
-/plugin install python-refactoring@pysmells
+/plugin marketplace add cheickmec/smellcheck
+/plugin install python-refactoring@smellcheck
 
 # OpenAI Codex CLI
-$skill-installer install cheickmec/pysmells
+$skill-installer install cheickmec/smellcheck
 
 # Cursor
 # Import from GitHub URL in skills settings
 
 # Or install from a local clone
-git clone https://github.com/cheickmec/pysmells.git
+git clone https://github.com/cheickmec/smellcheck.git
 # Point your tool to plugins/python-refactoring/skills/python-refactoring/
 ```
 
@@ -171,8 +171,8 @@ Each pattern includes a description, before/after code examples, and trade-offs:
 
 ## How It Compares
 
-| Feature | pysmells | PyExamine | SMART-Dal | Pyscent |
-|---------|----------|-----------|-----------|---------|
+| Feature | smellcheck | PyExamine | SMART-Dal | Pyscent |
+|---------|------------|-----------|-----------|---------|
 | Automated detections | 55 | 49 | 31 | 11 |
 | Refactoring guidance | 82 patterns | None | None | None |
 | Dependencies | 0 (stdlib) | pylint, radon | DesigniteJava | pylint, radon, cohesion |
