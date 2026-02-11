@@ -1,0 +1,14 @@
+name: Lint Commits
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  lint-commits:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: webiny/action-conventional-commits@v1.3.0
+        with:
+          allowed-commit-types: "feat,fix,refactor,test,docs,chore,ci,style,perf,build,revert"
