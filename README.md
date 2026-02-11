@@ -115,7 +115,7 @@ smellcheck src/ --select 001,057,CC
 smellcheck src/ --ignore 003,006
 
 # Module execution
-python -m smellcheck src/
+python3 -m smellcheck src/
 
 # Generate a baseline of current findings
 smellcheck src/ --generate-baseline > .smellcheck-baseline.json
