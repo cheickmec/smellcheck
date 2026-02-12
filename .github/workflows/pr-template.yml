@@ -6,7 +6,7 @@ on:
 
 jobs:
   validate-template:
-    if: github.actor != 'smellcheck-release-bot[bot]'
+    if: "!startsWith(github.head_ref, 'release-please--')"
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
