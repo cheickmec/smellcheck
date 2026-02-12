@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/cheickmec/smellcheck/compare/v0.2.6...v0.3.0) (2026-02-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* Legacy pattern refs (#001, #057, #CC, etc.) are removed. All rules are now identified exclusively by SC codes (SC101, SC701, SC210, etc.). Users must update --select, --ignore, # noqa comments, and pyproject.toml config to use SC codes. JSON/SARIF output no longer includes rule_id or patternRef fields.
+
+### Features
+
+* add commit-msg hooks for format enforcement and breaking change reminder ([5e88d0f](https://github.com/cheickmec/smellcheck/commit/5e88d0f02ff265d8195964012496d7e57e380584))
+* add pre-push hook to remind about PR description updates ([6ff730b](https://github.com/cheickmec/smellcheck/commit/6ff730bb76c262f135be09c3715982811c5bfb4f))
+* detect blocking calls in async functions ([#071](https://github.com/cheickmec/smellcheck/issues/071) / SC703) ([e5c57e6](https://github.com/cheickmec/smellcheck/commit/e5c57e6bf2d960465ffaabe2453cf51aecca13a5))
+* drop legacy pattern refs, SC codes are the sole identifier ([ce97d58](https://github.com/cheickmec/smellcheck/commit/ce97d5896bcf76b635899e96b8924b5d59985145))
+
+
+### Bug Fixes
+
+* refactor _is_offloaded_call and fix false-negative bug ([8ce8120](https://github.com/cheickmec/smellcheck/commit/8ce81209bbddabee3b7ccedc03c45549a6efbc2d))
+* replace logo with proper RGBA transparency ([6bc9263](https://github.com/cheickmec/smellcheck/commit/6bc9263283683956ebe936ccdfc18e613bb96950))
+* skip PR template check for release-please PRs ([2da8ac8](https://github.com/cheickmec/smellcheck/commit/2da8ac8c35fe0cc07db56440e74e71f5d4a1bd0b))
+
+
+### Miscellaneous
+
+* update project logo to playful skunk detective ([9085dd3](https://github.com/cheickmec/smellcheck/commit/9085dd3023c82d454a52776bc0c44437801a183f))
+
 ## [0.2.6](https://github.com/cheickmec/smellcheck/compare/v0.2.5...v0.2.6) (2026-02-12)
 
 
