@@ -168,6 +168,46 @@ first, *_, last = items
 _, _, important = triple
 ```
 
+## 071 — Avoid Blocking Calls in Async Functions
+
+**Smell:** Calling synchronous I/O or CPU-bound functions inside `async def` blocks the event loop.
+
+```python
+# Before — blocks the entire event loop
+import time
+import requests
+
+async def handle_request(url):
+    time.sleep(1)                     # blocks!
+    response = requests.get(url)      # blocks!
+    data = open("config.json").read() # blocks!
+    return response.text
+
+# After — use async equivalents or offload to a thread
+import asyncio
+import aiohttp
+
+async def handle_request(url):
+    await asyncio.sleep(1)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            data = await response.text()
+    # For unavoidable sync calls, offload:
+    config = await asyncio.to_thread(open("config.json").read)
+    return data
+```
+
+Common blocking calls and their async alternatives:
+
+| Blocking | Alternative |
+|----------|------------|
+| `time.sleep()` | `await asyncio.sleep()` |
+| `requests.get()` | `aiohttp` / `httpx.AsyncClient` |
+| `open().read()` | `aiofiles.open()` or `asyncio.to_thread()` |
+| `subprocess.run()` | `await asyncio.create_subprocess_exec()` |
+| `os.path.exists()` | `await asyncio.to_thread(os.path.exists, ...)` |
+| `input()` | framework-specific async input |
+
 ## 063 — Replace Manual Cleanup with contextlib
 
 **Smell:** Full class for simple context managers.

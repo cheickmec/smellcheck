@@ -1,6 +1,6 @@
 ---
 name: python-refactoring
-description: "Python refactoring catalog with 82 patterns covering immutability, class design, control flow, architecture, OO metrics, and Python idioms. Analyze code for smells and apply numbered refactoring patterns with before/after examples. Use when the user invokes /refactor or explicitly asks to refactor, clean up, or improve Python code quality."
+description: "Python refactoring catalog with 83 patterns covering immutability, class design, control flow, architecture, OO metrics, and Python idioms. Analyze code for smells and apply numbered refactoring patterns with before/after examples. Use when the user invokes /refactor or explicitly asks to refactor, clean up, or improve Python code quality."
 ---
 
 # Python Refactoring Skill
@@ -77,6 +77,7 @@ description: "Python refactoring catalog with 82 patterns covering immutability,
 | Cryptic error messages | 031 | hygiene.md |
 | Sequential IDs leaking info | SC107 | architecture.md |
 | Error codes instead of exceptions | SC501 | architecture.md |
+| Blocking calls in async functions | SC703 | idioms.md |
 | Manual try/finally cleanup | SC702, SC604 | idioms.md |
 | Full lists when streaming works | 059 | idioms.md |
 | Indexing tuples by position | SC305 | idioms.md |
@@ -102,12 +103,12 @@ Load **only** the file(s) matching detected smells:
 - `references/control.md` -- Guard clauses, pipelines, conditionals, phases (SC402-SC404, 043, 046, 047, 049, 053, SC405, 056, SC406, SC407)
 - `references/architecture.md` -- DI, singletons, exceptions, delegates (SC303, SC106, SC107, 035, 045, SC501, SC502, SC505, SC506, SC507, SC508)
 - `references/hygiene.md` -- Constants, dead code, comments, style (SC601, SC602, 011, SC606, SC401, 025, 031-032, SC205, SC603, SC605)
-- `references/idioms.md` -- Context managers, generators, unpacking, protocols (SC701, SC702, 059, 060, SC304, SC305, SC604)
+- `references/idioms.md` -- Context managers, generators, unpacking, protocols, async (SC701, SC702, SC703, 059, 060, SC304, SC305, SC604)
 - `references/metrics.md` -- OO metrics: cohesion, coupling, fan-out, response, delegation (SC801, SC802, SC803, SC804, SC805)
 
 ## Automated Smell Detector
 
-`scripts/detect_smells.py` -- stdlib-only AST walker that programmatically detects 55 patterns (40 per-file + 10 cross-file + 5 OO metrics).
+`scripts/detect_smells.py` -- stdlib-only AST walker that programmatically detects 56 patterns (41 per-file + 10 cross-file + 5 OO metrics).
 
 If `smellcheck` is pip-installed, the `smellcheck` CLI is also available:
 
@@ -121,7 +122,7 @@ smellcheck src/
 smellcheck src/ --min-severity warning --fail-on warning
 ```
 
-**Per-file detections** (40): SC101 setters, SC201 long functions, SC601 magic numbers, SC602 bare except, SC202 generic names, SC301 extract class, SC102 UPPER_CASE without Final, SC103 public attrs, SC302 isinstance chains, SC104 half-built objects, SC105 boolean flags, SC303 singleton, SC401 dead code after return, SC106 global mutables, SC203 input() in logic, SC107 sequential IDs, SC204 return None|list, SC205 excessive decorators, SC206 too many params, SC603 string concatenation, SC402 deep nesting, SC403 loop+append, SC207 CQS violation, SC404 complex booleans, SC501 error codes, SC502 Law of Demeter, SC405 control flags, SC701 mutable defaults, SC702 open without with, SC304 dataclass candidate, SC305 sequential indexing, SC604 contextlib candidate, SC210 cyclomatic complexity, SC208 unused parameters, SC605 empty catch block, SC209 long lambda, SC406 complex comprehension, SC407 missing else, SC306 lazy class, SC307 temporary field.
+**Per-file detections** (41): SC101 setters, SC201 long functions, SC601 magic numbers, SC602 bare except, SC202 generic names, SC301 extract class, SC102 UPPER_CASE without Final, SC103 public attrs, SC302 isinstance chains, SC104 half-built objects, SC105 boolean flags, SC303 singleton, SC401 dead code after return, SC106 global mutables, SC203 input() in logic, SC107 sequential IDs, SC204 return None|list, SC205 excessive decorators, SC206 too many params, SC603 string concatenation, SC402 deep nesting, SC403 loop+append, SC207 CQS violation, SC404 complex booleans, SC501 error codes, SC502 Law of Demeter, SC405 control flags, SC701 mutable defaults, SC702 open without with, SC703 blocking calls in async, SC304 dataclass candidate, SC305 sequential indexing, SC604 contextlib candidate, SC210 cyclomatic complexity, SC208 unused parameters, SC605 empty catch block, SC209 long lambda, SC406 complex comprehension, SC407 missing else, SC306 lazy class, SC307 temporary field.
 
 **Cross-file detections** (10): SC606 duplicate functions (AST-normalized hashing), SC503 cyclic imports (DFS), SC504 god modules, SC211 feature envy, SC505 shotgun surgery, SC308 deep inheritance, SC309 wide hierarchy, SC506 inappropriate intimacy, SC507 speculative generality, SC508 unstable dependency.
 
