@@ -16,5 +16,7 @@ venv/
 .DS_Store
 .idea/
 .serena/
+.claude/
+.omc/
 uv.lock
 logo-candidates/
