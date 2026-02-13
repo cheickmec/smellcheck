@@ -1010,13 +1010,14 @@ def test_cache_cross_file_still_runs(tmp_path):
 
     # First scan — populates cache + cross-file
     findings1 = scan_paths([tmp_path], cache_dir=cache_dir, use_cache=True)
-    cyclic1 = [f for f in findings1 if f.pattern == "SC501"]
+    cyclic1 = [f for f in findings1 if f.pattern == "SC503"]
+    assert len(cyclic1) > 0, "Expected cyclic import findings"
 
     # Second scan — per-file cached, cross-file must still run
     findings2 = scan_paths([tmp_path], cache_dir=cache_dir, use_cache=True)
-    cyclic2 = [f for f in findings2 if f.pattern == "SC501"]
+    cyclic2 = [f for f in findings2 if f.pattern == "SC503"]
 
-    assert len(cyclic1) == len(cyclic2)
+    assert len(cyclic2) == len(cyclic1)
 
 
 def test_cli_no_cache(tmp_path):

@@ -742,7 +742,7 @@ def _clear_cache(cache_dir: Path) -> int:
     removed = 0
     if cache_dir.is_dir():
         for f in cache_dir.iterdir():
-            if f.suffix == ".json":
+            if f.suffix in (".json", ".tmp"):
                 try:
                     f.unlink()
                     removed += 1
@@ -3346,7 +3346,6 @@ def scan_paths(
                 cached = _read_cache(_cache, key)
                 if cached is not None:
                     findings, fd = cached
-                    # Update filepath in case of relocation
                     all_findings.extend(findings)
                     all_file_data.append(fd)
                     continue
