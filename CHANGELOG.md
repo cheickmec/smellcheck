@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1](https://github.com/cheickmec/smellcheck/compare/v0.3.0...v0.3.1) (2026-02-13)
+
+
+### Features
+
+* vendor smellcheck into skill bundle for zero-install UX ([1d2a4f4](https://github.com/cheickmec/smellcheck/commit/1d2a4f496203256519ff9099a4119969efb578fb))
+
+
+### Bug Fixes
+
+* add vendored __init__.py to release-please extra-files ([01467aa](https://github.com/cheickmec/smellcheck/commit/01467aa3cdfb41af5b11164337232f0f9c99c03e))
+* add x-release-please-version markers to vendored __init__.py ([c878e9d](https://github.com/cheickmec/smellcheck/commit/c878e9dca4ac5000d271151a22a9d32721a040a2))
+* address PR review feedback on vendoring implementation ([be43376](https://github.com/cheickmec/smellcheck/commit/be433763e5fd1ec71a16344193bc9e31bcc0a684))
+
+
+### Documentation
+
+* add SC703 to skills catalog and update pattern counts ([67a094c](https://github.com/cheickmec/smellcheck/commit/67a094ce4ee8162b8f7a93c282eebb2952254cb4))
+* update CONTRIBUTING.md with hook install steps and breaking change convention ([27b6fb1](https://github.com/cheickmec/smellcheck/commit/27b6fb1418ddb7c31faa760763d0ef66d611f38b))
+* update pattern counts to 83 and install instructions ([a1b04e9](https://github.com/cheickmec/smellcheck/commit/a1b04e94ca6a02f9b03d746351c0ce8c1d289a82))
+
 ## [0.3.0](https://github.com/cheickmec/smellcheck/compare/v0.2.6...v0.3.0) (2026-02-12)
 
 
