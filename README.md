@@ -79,6 +79,15 @@ smellcheck src/ --generate-baseline > .smellcheck-baseline.json
 
 # Only report findings not in the baseline
 smellcheck src/ --baseline .smellcheck-baseline.json
+
+# Show documentation for a rule (description + before/after example)
+smellcheck --explain SC701
+
+# List all rules in a family
+smellcheck --explain SC4
+
+# List all rules grouped by family
+smellcheck --explain all
 ```
 
 ## Configuration

@@ -10,6 +10,8 @@ from pathlib import Path
 
 from smellcheck import __version__
 from smellcheck.detector import (
+    _RULE_DESCRIPTIONS,
+    _RULE_EXAMPLES,
     _RULE_REGISTRY,
     _VALID_FAMILIES,
     _VALID_SCOPES,
@@ -770,3 +772,66 @@ def test_offloaded_and_standalone_blocking_call(tmp_path):
     blocking = [f for f in findings if f.pattern == "SC703"]
     assert len(blocking) == 1
     assert "time.sleep" in blocking[0].message
+
+
+# ---------------------------------------------------------------------------
+# --explain
+# ---------------------------------------------------------------------------
+
+
+def test_explain_single_rule():
+    r = _run_cli("--explain", "SC701")
+    assert r.returncode == 0
+    assert "SC701" in r.stdout
+    assert "Mutable Default" in r.stdout
+    assert "Before:" in r.stdout
+    assert "After:" in r.stdout
+    assert "# noqa: SC701" in r.stdout
+
+
+def test_explain_single_rule_lowercase():
+    r = _run_cli("--explain", "sc701")
+    assert r.returncode == 0
+    assert "SC701" in r.stdout
+
+
+def test_explain_family():
+    r = _run_cli("--explain", "SC4")
+    assert r.returncode == 0
+    assert "Control Flow" in r.stdout
+    assert "SC401" in r.stdout
+    assert "SC407" in r.stdout
+
+
+def test_explain_all():
+    r = _run_cli("--explain", "all")
+    assert r.returncode == 0
+    for family in ["State", "Functions", "Types", "Control", "Architecture", "Hygiene", "Idioms", "Metrics"]:
+        assert family in r.stdout
+
+
+def test_explain_bare():
+    """--explain with no argument lists all rules."""
+    r = _run_cli("--explain")
+    assert r.returncode == 0
+    assert "SC101" in r.stdout
+    assert "SC805" in r.stdout
+
+
+def test_explain_invalid_code():
+    r = _run_cli("--explain", "SC999")
+    assert r.returncode != 0
+    out = r.stdout + r.stderr
+    assert "unknown" in out.lower() or "no rule" in out.lower()
+
+
+def test_explain_all_rules_have_descriptions():
+    """Every rule in the registry must have a description."""
+    for code in _RULE_REGISTRY:
+        assert code in _RULE_DESCRIPTIONS, f"{code} missing from _RULE_DESCRIPTIONS"
+
+
+def test_explain_all_rules_have_examples_entry():
+    """Every rule in the registry must have an entry in _RULE_EXAMPLES."""
+    for code in _RULE_REGISTRY:
+        assert code in _RULE_EXAMPLES, f"{code} missing from _RULE_EXAMPLES"

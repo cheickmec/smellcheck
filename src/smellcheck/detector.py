@@ -196,6 +196,212 @@ _RULE_DESCRIPTIONS: dict[str, str] = {
 }
 # fmt: on
 
+# Human-readable family labels for --explain output.
+_FAMILY_LABELS: Final[dict[str, str]] = {
+    "state": "State & Immutability",
+    "functions": "Functions",
+    "types": "Types & Classes",
+    "control": "Control Flow",
+    "architecture": "Architecture",
+    "hygiene": "Hygiene",
+    "idioms": "Idioms",
+    "metrics": "Metrics",
+}
+
+# Before/after examples for --explain.  Rules with clear code patterns get a
+# (before, after) tuple; cross-file and metric rules get None.
+# fmt: off
+_RULE_EXAMPLES: dict[str, tuple[str, str] | None] = {
+    # --- State & Immutability ---
+    "SC101": (
+        "class User:\n    def set_name(self, name):\n        self._name = name",
+        "class User:\n    def __init__(self, name):\n        self._name = name",
+    ),
+    "SC102": (
+        "tax_rate = 0.08\nprice = amount * tax_rate",
+        "TAX_RATE = 0.08\nprice = amount * TAX_RATE",
+    ),
+    "SC103": (
+        "class Account:\n    def __init__(self):\n        self.balance = 0",
+        "class Account:\n    def __init__(self):\n        self._balance = 0\n\n    @property\n    def balance(self):\n        return self._balance",
+    ),
+    "SC104": (
+        "user = User()\nuser.name = 'Alice'\nuser.age = 30",
+        "user = User(name='Alice', age=30)",
+    ),
+    "SC105": (
+        "class Employee:\n    is_manager = False\n    is_admin = False\n    is_contractor = False",
+        "class Employee:\n    roles: set[str] = field(default_factory=set)",
+    ),
+    "SC106": (
+        "db = None\ndef get_users():\n    return db.query('SELECT *')",
+        "def get_users(db):\n    return db.query('SELECT *')",
+    ),
+    "SC107": (
+        "next_id = 0\ndef create():\n    global next_id\n    next_id += 1\n    return next_id",
+        "import uuid\ndef create():\n    return str(uuid.uuid4())",
+    ),
+    # --- Functions ---
+    "SC201": (
+        "def process(data):\n    # validate\n    ...\n    # transform\n    ...\n    # save\n    ...",
+        "def process(data):\n    validate(data)\n    transformed = transform(data)\n    save(transformed)",
+    ),
+    "SC202": (
+        "def get_user(id):\n    result = db.query(id)\n    return result",
+        "def get_user(id):\n    user = db.query(id)\n    return user",
+    ),
+    "SC203": (
+        "def greet():\n    name = input('Name: ')\n    print(f'Hi {name}')",
+        "def greet(name: str):\n    print(f'Hi {name}')",
+    ),
+    "SC204": (
+        "def find(name):\n    if found:\n        return [item]\n    return None",
+        "def find(name):\n    if found:\n        return [item]\n    return []",
+    ),
+    "SC205": (
+        "@log\n@trace\n@cache\n@retry\ndef add(a, b):\n    return a + b",
+        "def add(a, b):\n    return a + b  # move cross-cutting concerns elsewhere",
+    ),
+    "SC206": (
+        "def ship(name, street, city, state, zip, country, weight, method):\n    ...",
+        "def ship(address: Address, package: Package):\n    ...",
+    ),
+    "SC207": (
+        "def pop_and_count(items):\n    items.pop()\n    return len(items)",
+        "def remove_last(items):\n    items.pop()\n\ndef count(items):\n    return len(items)",
+    ),
+    "SC208": (
+        "def greet(name, age, title):\n    print(f'Hi {name}')",
+        "def greet(name):\n    print(f'Hi {name}')",
+    ),
+    "SC209": (
+        "transform = lambda x: x.strip().lower().replace(' ', '_')",
+        "def to_slug(x):\n    return x.strip().lower().replace(' ', '_')",
+    ),
+    "SC210": (
+        "def rate(x):\n    if x > 100:\n        if x > 200:\n            ...\n        elif x > 150:\n            ...\n    elif x > 50:\n        ...",
+        "def rate(x):\n    return _high(x) if x > 100 else _low(x)\n\ndef _high(x): ...\ndef _low(x): ...",
+    ),
+    "SC211": None,  # cross-file — feature envy
+    # --- Types & Classes ---
+    "SC301": (
+        "# price calc scattered across 5 modules\ndef calc_tax(p): ...\ndef calc_discount(p): ...",
+        "class PriceCalculator:\n    def tax(self, p): ...\n    def discount(self, p): ...",
+    ),
+    "SC302": (
+        "if isinstance(shape, Circle):\n    area = math.pi * shape.r ** 2\nelif isinstance(shape, Rect):\n    area = shape.w * shape.h",
+        "class Circle:\n    def area(self): return math.pi * self.r ** 2\n\nclass Rect:\n    def area(self): return self.w * self.h",
+    ),
+    "SC303": (
+        "class DB:\n    _instance = None\n    @classmethod\n    def get(cls):\n        if not cls._instance:\n            cls._instance = cls()\n        return cls._instance",
+        "# Use dependency injection instead\ndef create_app(db):\n    ...",
+    ),
+    "SC304": (
+        "class Point:\n    def __init__(self, x, y):\n        self.x = x\n        self.y = y\n    def __repr__(self): ...\n    def __eq__(self, o): ...",
+        "@dataclass\nclass Point:\n    x: float\n    y: float",
+    ),
+    "SC305": (
+        "coords = (10.5, 20.3)\nx = coords[0]\ny = coords[1]",
+        "x, y = coords\n# or use a namedtuple / dataclass",
+    ),
+    "SC306": (
+        "class Formatter:\n    def format(self, text):\n        return text.strip()",
+        "def format_text(text):\n    return text.strip()",
+    ),
+    "SC307": (
+        "class Report:\n    def __init__(self):\n        self._header = None  # only used in render()\n        self._footer = None  # only used in render()",
+        "class Report:\n    def render(self, header, footer):\n        ...",
+    ),
+    "SC308": None,  # cross-file — deep inheritance
+    "SC309": None,  # cross-file — wide hierarchy
+    # --- Control Flow ---
+    "SC401": (
+        "def process(x):\n    return x\n    print('done')  # unreachable",
+        "def process(x):\n    return x",
+    ),
+    "SC402": (
+        "def check(user):\n    if user:\n        if user.active:\n            if user.verified:\n                return True\n    return False",
+        "def check(user):\n    if not user:\n        return False\n    if not user.active:\n        return False\n    if not user.verified:\n        return False\n    return True",
+    ),
+    "SC403": (
+        "result = []\nfor x in items:\n    result.append(x * 2)",
+        "result = [x * 2 for x in items]",
+    ),
+    "SC404": (
+        "if a and (b or c) and not (d and e):\n    ...",
+        "is_eligible = a and (b or c)\nis_allowed = not (d and e)\nif is_eligible and is_allowed:\n    ...",
+    ),
+    "SC405": (
+        "found = False\nfor item in items:\n    if item.match:\n        found = True\nif found: ...",
+        "for item in items:\n    if item.match:\n        break",
+    ),
+    "SC406": (
+        "result = [f(x) for xs in matrix for x in xs if x > 0 if x != skip]",
+        "result = []\nfor xs in matrix:\n    for x in xs:\n        if x > 0 and x != skip:\n            result.append(f(x))",
+    ),
+    "SC407": (
+        "if status == 'a':\n    ...\nelif status == 'b':\n    ...",
+        "if status == 'a':\n    ...\nelif status == 'b':\n    ...\nelse:\n    raise ValueError(f'Unknown: {status}')",
+    ),
+    # --- Architecture ---
+    "SC501": (
+        "def save(data):\n    if not valid(data):\n        return -1  # error code\n    return 0",
+        "def save(data):\n    if not valid(data):\n        raise ValidationError('invalid data')",
+    ),
+    "SC502": (
+        "city = order.customer.address.city",
+        "city = order.shipping_city()",
+    ),
+    "SC503": None,  # cross-file — cyclic import
+    "SC504": None,  # cross-file — god module
+    "SC505": None,  # cross-file — shotgun surgery
+    "SC506": None,  # cross-file — inappropriate intimacy
+    "SC507": None,  # cross-file — speculative generality
+    "SC508": None,  # cross-file — unstable dependency
+    # --- Hygiene ---
+    "SC601": (
+        "if retry_count > 3:\n    time.sleep(60)",
+        "MAX_RETRIES = 3\nRETRY_DELAY = 60\nif retry_count > MAX_RETRIES:\n    time.sleep(RETRY_DELAY)",
+    ),
+    "SC602": (
+        "try:\n    process()\nexcept:\n    pass",
+        "try:\n    process()\nexcept (ValueError, OSError) as e:\n    logger.error(e)",
+    ),
+    "SC603": (
+        "msg = 'Hello ' + name + ', welcome to ' + place",
+        "msg = f'Hello {name}, welcome to {place}'",
+    ),
+    "SC604": (
+        "lock.acquire()\ntry:\n    do_work()\nfinally:\n    lock.release()",
+        "with lock:\n    do_work()",
+    ),
+    "SC605": (
+        "try:\n    risky()\nexcept Exception:\n    pass",
+        "try:\n    risky()\nexcept Exception:\n    logger.warning('risky() failed', exc_info=True)",
+    ),
+    "SC606": None,  # cross-file — duplicated code
+    # --- Idioms ---
+    "SC701": (
+        "def add(item, items=[]):\n    items.append(item)\n    return items",
+        "def add(item, items=None):\n    if items is None:\n        items = []\n    items.append(item)\n    return items",
+    ),
+    "SC702": (
+        "f = open('data.txt')\ndata = f.read()\nf.close()",
+        "with open('data.txt') as f:\n    data = f.read()",
+    ),
+    "SC703": (
+        "async def handler(request):\n    time.sleep(5)\n    data = requests.get(url)",
+        "async def handler(request):\n    await asyncio.sleep(5)\n    data = await aiohttp.get(url)",
+    ),
+    # --- Metrics ---
+    "SC801": None,  # metric — low class cohesion (LCOM)
+    "SC802": None,  # metric — high coupling (CBO)
+    "SC803": None,  # metric — excessive fan-out
+    "SC804": None,  # metric — high response for class (RFC)
+    "SC805": None,  # metric — middle man
+}
+# fmt: on
+
 
 @dataclass
 class Finding:
@@ -3168,6 +3374,77 @@ def print_findings(
 # CLI
 # ---------------------------------------------------------------------------
 
+
+def _explain(code: str) -> None:
+    """Print documentation for a rule, a family prefix, or all rules."""
+    code = code.strip()
+
+    # --- Single rule: SC701 ---
+    if code.upper() in _RULE_REGISTRY:
+        code = code.upper()
+        rule = _RULE_REGISTRY[code]
+        desc = _RULE_DESCRIPTIONS.get(code, "")
+        example = _RULE_EXAMPLES.get(code)
+        family_prefix = code[:3] + "xx"
+        family_label = _FAMILY_LABELS.get(rule.family, rule.family)
+
+        print(f"{code}: {rule.name}")
+        print(f"Family:   {family_label} ({family_prefix})")
+        print(f"Severity: {rule.default_severity}")
+        print(f"Scope:    {rule.scope}")
+        if desc:
+            print()
+            print(textwrap.indent(desc, "  "))
+        if example is not None:
+            before, after = example
+            print()
+            print("  Before:")
+            print(textwrap.indent(before, "    "))
+            print()
+            print("  After:")
+            print(textwrap.indent(after, "    "))
+        print()
+        print(f"Suppress: # noqa: {code}")
+        return
+
+    # --- Family prefix: SC4 → all SC4xx rules ---
+    upper = code.upper()
+    if len(upper) == 3 and upper.startswith("SC") and upper[2].isdigit():
+        prefix = upper  # e.g. "SC4"
+        matched = {c: r for c, r in _RULE_REGISTRY.items() if c.startswith(prefix)}
+        if not matched:
+            print(f"No rules found with prefix {prefix}xx", file=sys.stderr)
+            sys.exit(1)
+        first = next(iter(matched.values()))
+        family_label = _FAMILY_LABELS.get(first.family, first.family)
+        print(f"{prefix}xx \u2014 {family_label}")
+        for c, r in matched.items():
+            print(f"  {c}  {r.name:<45s} {r.default_severity}")
+        return
+
+    # --- All rules ---
+    if upper == "ALL" or code == "":
+        families: dict[str, list[tuple[str, RuleDef]]] = {}
+        for c, r in _RULE_REGISTRY.items():
+            families.setdefault(r.family, []).append((c, r))
+        for family_key in ["state", "functions", "types", "control", "architecture", "hygiene", "idioms", "metrics"]:
+            rules = families.get(family_key, [])
+            if not rules:
+                continue
+            prefix = rules[0][0][:3] + "xx"
+            label = _FAMILY_LABELS.get(family_key, family_key)
+            print(f"{prefix} \u2014 {label}")
+            for c, r in rules:
+                print(f"  {c}  {r.name:<45s} {r.default_severity}")
+            print()
+        return
+
+    # --- Unknown ---
+    print(f"Unknown rule or prefix: {code}", file=sys.stderr)
+    print("Use --explain SC701, --explain SC4, or --explain all", file=sys.stderr)
+    sys.exit(1)
+
+
 _HELP_TEXT: Final = textwrap.dedent("""\
     Usage: smellcheck <path> [path ...] [options]
 
@@ -3188,6 +3465,7 @@ _HELP_TEXT: Final = textwrap.dedent("""\
       --select CODES      Only run these checks (comma-separated, e.g. SC701,SC601)
       --ignore CODES      Skip these checks (comma-separated, e.g. SC601,SC202)
       --scope SCOPE       Only show findings of this scope: file | cross_file | metric
+      --explain [CODE]     Show rule docs: SC701, SC4 (family), or all
       --generate-baseline Output a JSON baseline of current findings to stdout
       --baseline PATH     Compare against baseline; only report new findings
       --version           Show version and exit
@@ -3316,6 +3594,18 @@ def _parse_args(
 
 def main():
     raw_args = list(sys.argv[1:])
+
+    # --explain: show rule documentation and exit (no paths needed)
+    if "--explain" in raw_args:
+        idx = raw_args.index("--explain")
+        if idx + 1 < len(raw_args) and not raw_args[idx + 1].startswith("-"):
+            code = raw_args[idx + 1]
+            del raw_args[idx : idx + 2]
+            _explain(code)
+        else:
+            raw_args.remove("--explain")
+            _explain("all")
+        sys.exit(0)
 
     # Extract baseline flags before _parse_args (avoids path validation)
     generate_baseline = "--generate-baseline" in raw_args
