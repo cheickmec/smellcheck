@@ -22,6 +22,7 @@ from smellcheck.detector import (
     _deserialize_file_data,
     _deserialize_finding,
     _fingerprint,
+    _get_changed_files,
     _is_suppressed,
     _parse_args,
     _parse_block_directives,
@@ -1396,3 +1397,200 @@ def test_explain_mentions_block_suppression(tmp_path):
     assert "smellcheck: disable" in result.stdout
     assert "smellcheck: enable" in result.stdout
     assert "smellcheck: disable-file" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Diff-aware scanning (--diff / --changed-only)
+# ---------------------------------------------------------------------------
+
+
+def _git(tmp_path: Path, *args: str) -> str:
+    """Run a git command in tmp_path and return stdout."""
+    result = subprocess.run(
+        ["git", *args],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _init_git_repo(tmp_path: Path) -> None:
+    """Initialise a git repo with one committed Python file."""
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@test.com")
+    _git(tmp_path, "config", "user.name", "Test")
+    # Initial commit with a clean file
+    clean = tmp_path / "clean.py"
+    clean.write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "initial")
+
+
+def test_diff_scans_only_changed_files(tmp_path):
+    """--diff should only scan files changed since the given ref."""
+    _init_git_repo(tmp_path)
+    # Add a smelly file after the initial commit
+    smelly = tmp_path / "smelly.py"
+    smelly.write_text(
+        textwrap.dedent("""\
+        def foo(a, b, c, d, e, f, g, h):
+            pass
+        """),
+        encoding="utf-8",
+    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "add smelly")
+    result = _run_cli(str(tmp_path), "--diff", "HEAD~1", cwd=tmp_path)
+    # Should find something in smelly.py but NOT in clean.py
+    assert "smelly.py" in result.stdout
+    assert "clean.py" not in result.stdout
+
+
+def test_diff_unchanged_files_excluded(tmp_path):
+    """Files present but not changed since ref should not appear."""
+    _init_git_repo(tmp_path)
+    # No new changes — diff vs HEAD should find nothing
+    result = _run_cli(str(tmp_path), "--diff", "HEAD", cwd=tmp_path)
+    assert result.returncode == 0
+    assert "No changed Python files found" in result.stderr
+
+
+def test_changed_only_alias(tmp_path):
+    """--changed-only is shorthand for --diff HEAD."""
+    _init_git_repo(tmp_path)
+    # Modify a tracked file (unstaged)
+    smelly = tmp_path / "clean.py"
+    smelly.write_text(
+        textwrap.dedent("""\
+        def foo(a, b, c, d, e, f, g, h):
+            pass
+        """),
+        encoding="utf-8",
+    )
+    result = _run_cli(str(tmp_path), "--changed-only", cwd=tmp_path)
+    assert "clean.py" in (result.stdout + result.stderr)
+
+
+def test_diff_no_changed_files_exits_zero(tmp_path):
+    """When --diff finds no changed .py files, exit 0 with a message."""
+    _init_git_repo(tmp_path)
+    result = _run_cli(str(tmp_path), "--diff", "HEAD", cwd=tmp_path)
+    assert result.returncode == 0
+    assert "No changed Python files found" in result.stderr
+
+
+def test_diff_not_a_git_repo(tmp_path):
+    """--diff outside a git repo should exit 1 with a clear error."""
+    # tmp_path is NOT a git repo
+    p = tmp_path / "sample.py"
+    p.write_text("x = 1\n", encoding="utf-8")
+    result = _run_cli(str(tmp_path), "--diff", "HEAD", cwd=tmp_path)
+    assert result.returncode == 1
+    assert "git repository" in result.stderr.lower()
+
+
+def test_diff_path_intersection(tmp_path):
+    """--diff should intersect with positional path args."""
+    _init_git_repo(tmp_path)
+    subdir = tmp_path / "sub"
+    subdir.mkdir()
+    # Create files in two directories
+    (tmp_path / "root_change.py").write_text("x = 1\n", encoding="utf-8")
+    (subdir / "sub_change.py").write_text(
+        textwrap.dedent("""\
+        def foo(a, b, c, d, e, f, g, h):
+            pass
+        """),
+        encoding="utf-8",
+    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "add files")
+    # Only scan sub/ — root_change.py should be excluded even though it's changed
+    result = _run_cli(str(subdir), "--diff", "HEAD~1", cwd=tmp_path)
+    assert "sub_change.py" in result.stdout
+    assert "root_change.py" not in result.stdout
+
+
+def test_diff_mutually_exclusive_with_generate_baseline(tmp_path):
+    """--diff and --generate-baseline cannot be used together."""
+    _init_git_repo(tmp_path)
+    result = _run_cli(
+        str(tmp_path), "--diff", "HEAD", "--generate-baseline", cwd=tmp_path
+    )
+    assert result.returncode == 1
+    assert "mutually exclusive" in result.stderr
+
+
+def test_diff_composes_with_fail_on(tmp_path):
+    """--diff works alongside --fail-on."""
+    _init_git_repo(tmp_path)
+    smelly = tmp_path / "smelly.py"
+    smelly.write_text(
+        textwrap.dedent("""\
+        def foo(a, b, c, d, e, f, g, h):
+            pass
+        """),
+        encoding="utf-8",
+    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "add smelly")
+    result = _run_cli(
+        str(tmp_path), "--diff", "HEAD~1", "--fail-on", "info", cwd=tmp_path
+    )
+    # Should exit 1 because there are findings at info+ level
+    assert result.returncode == 1
+
+
+def test_get_changed_files_unit(tmp_path):
+    """Unit test for _get_changed_files."""
+    _init_git_repo(tmp_path)
+    new_file = tmp_path / "new.py"
+    new_file.write_text("y = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "add new")
+    import os
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(tmp_path)
+        changed = _get_changed_files("HEAD~1", [tmp_path])
+        assert any(p.name == "new.py" for p in changed)
+        assert not any(p.name == "clean.py" for p in changed)
+    finally:
+        os.chdir(old_cwd)
+
+
+def test_diff_help_text():
+    """--help should mention --diff and --changed-only."""
+    result = _run_cli("--help")
+    assert "--diff" in result.stdout
+    assert "--changed-only" in result.stdout
+
+
+def test_diff_invalid_ref(tmp_path):
+    """--diff with a nonexistent ref should exit 1 with a git error."""
+    _init_git_repo(tmp_path)
+    result = _run_cli(str(tmp_path), "--diff", "nonexistent_ref", cwd=tmp_path)
+    assert result.returncode == 1
+    assert "git diff failed" in result.stderr
+
+
+def test_diff_file_with_spaces(tmp_path):
+    """--diff handles files with spaces in their names."""
+    _init_git_repo(tmp_path)
+    spaced = tmp_path / "my file.py"
+    spaced.write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "add spaced")
+    result = _run_cli(str(tmp_path), "--diff", "HEAD~1", cwd=tmp_path)
+    assert result.returncode == 0
+
+
+def test_diff_and_changed_only_warns(tmp_path):
+    """--diff and --changed-only together warns that --changed-only is ignored."""
+    _init_git_repo(tmp_path)
+    result = _run_cli(
+        str(tmp_path), "--diff", "HEAD", "--changed-only", cwd=tmp_path
+    )
+    assert "ignored" in result.stderr.lower()

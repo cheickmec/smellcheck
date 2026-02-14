@@ -191,6 +191,34 @@ Fingerprints are resilient to line-number changes — renaming or moving code ar
 
 `--generate-baseline` and `--baseline` are mutually exclusive.
 
+## Diff-Aware Scanning
+
+Focus on files you actually changed — skip the rest of the codebase:
+
+```bash
+# Only scan files changed vs. main branch
+smellcheck src/ --diff main
+
+# Only scan files changed in the last commit
+smellcheck src/ --diff HEAD~1
+
+# Only scan uncommitted changes (shorthand for --diff HEAD)
+smellcheck src/ --changed-only
+```
+
+In CI, this keeps PR feedback fast and relevant:
+
+```yaml
+- uses: cheickmec/smellcheck@v0
+  with:
+    diff: origin/main
+    fail-on: warning
+```
+
+Cross-file checks (cyclic imports, shotgun surgery, etc.) run on the changed file set only. This is best-effort — for full cross-file accuracy, run without `--diff`.
+
+`--diff` and `--generate-baseline` are mutually exclusive. `--diff` composes with all other flags (`--baseline`, `--format`, `--fail-on`, `--select`, `--ignore`).
+
 ## Caching
 
 smellcheck caches per-file analysis results in `.smellcheck-cache/` to skip unchanged files on repeated scans. This is especially useful for pre-commit hooks and editor integrations.

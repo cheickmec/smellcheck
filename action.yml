@@ -21,6 +21,10 @@ inputs:
     description: 'Output format: text | json | github | sarif'
     required: false
     default: 'github'
+  diff:
+    description: 'Only scan files changed since this git ref (e.g. origin/main, HEAD~1)'
+    required: false
+    default: ''
   baseline:
     description: 'Path to baseline JSON file (suppress known findings)'
     required: false
@@ -42,9 +46,17 @@ runs:
       run: pip install "$GITHUB_ACTION_PATH"
     - name: Run smellcheck
       shell: bash
+      env:
+        INPUT_PATHS: ${{ inputs.paths }}
+        INPUT_FORMAT: ${{ inputs.format }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_MIN_SEV: ${{ inputs.min-severity }}
+        INPUT_DIFF: ${{ inputs.diff }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
       run: |
-        smellcheck ${{ inputs.paths }} \
-          --format ${{ inputs.format }} \
-          --fail-on ${{ inputs.fail-on }} \
-          --min-severity ${{ inputs.min-severity }} \
-          ${{ inputs.baseline && format('--baseline {0}', inputs.baseline) || '' }}
+        smellcheck $INPUT_PATHS \
+          --format "$INPUT_FORMAT" \
+          --fail-on "$INPUT_FAIL_ON" \
+          --min-severity "$INPUT_MIN_SEV" \
+          ${INPUT_DIFF:+--diff "$INPUT_DIFF"} \
+          ${INPUT_BASELINE:+--baseline "$INPUT_BASELINE"}
