@@ -1550,15 +1550,9 @@ def test_get_changed_files_unit(tmp_path):
     new_file.write_text("y = 2\n", encoding="utf-8")
     _git(tmp_path, "add", ".")
     _git(tmp_path, "commit", "-m", "add new")
-    import os
-    old_cwd = os.getcwd()
-    try:
-        os.chdir(tmp_path)
-        changed = _get_changed_files("HEAD~1", [tmp_path])
-        assert any(p.name == "new.py" for p in changed)
-        assert not any(p.name == "clean.py" for p in changed)
-    finally:
-        os.chdir(old_cwd)
+    changed = _get_changed_files("HEAD~1", [tmp_path])
+    assert any(p.name == "new.py" for p in changed)
+    assert not any(p.name == "clean.py" for p in changed)
 
 
 def test_diff_help_text():
@@ -1585,6 +1579,53 @@ def test_diff_file_with_spaces(tmp_path):
     _git(tmp_path, "commit", "-m", "add spaced")
     result = _run_cli(str(tmp_path), "--diff", "HEAD~1", cwd=tmp_path)
     assert result.returncode == 0
+    assert "No changed Python files found" not in result.stderr
+
+
+def test_diff_composes_with_baseline(tmp_path):
+    """--diff works alongside --baseline."""
+    _init_git_repo(tmp_path)
+    smelly = tmp_path / "smelly.py"
+    smelly.write_text(
+        textwrap.dedent("""\
+        def foo(a, b, c, d, e, f, g, h):
+            pass
+        """),
+        encoding="utf-8",
+    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "add smelly")
+    # Generate baseline that captures the finding
+    baseline = _run_cli(str(tmp_path), "--generate-baseline", cwd=tmp_path)
+    baseline_file = tmp_path / ".smellcheck-baseline.json"
+    baseline_file.write_text(baseline.stdout, encoding="utf-8")
+    # Run with --diff + --baseline — finding should be suppressed
+    result = _run_cli(
+        str(tmp_path), "--diff", "HEAD~1",
+        "--baseline", str(baseline_file), cwd=tmp_path,
+    )
+    assert "0 new findings" in result.stderr
+
+
+def test_diff_composes_with_select(tmp_path):
+    """--diff works alongside --select to filter checks."""
+    _init_git_repo(tmp_path)
+    smelly = tmp_path / "smelly.py"
+    smelly.write_text(
+        textwrap.dedent("""\
+        def foo(a, b, c, d, e, f, g, h):
+            pass
+        """),
+        encoding="utf-8",
+    )
+    _git(tmp_path, "add", ".")
+    _git(tmp_path, "commit", "-m", "add smelly")
+    # Select only a rule that won't match (SC101 = mutable default)
+    result = _run_cli(
+        str(tmp_path), "--diff", "HEAD~1", "--select", "SC101", cwd=tmp_path,
+    )
+    # SC202 (too many params) should NOT appear because we selected only SC101
+    assert "SC202" not in result.stdout
 
 
 def test_diff_and_changed_only_warns(tmp_path):
