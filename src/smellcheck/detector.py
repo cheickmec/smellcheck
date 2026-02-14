@@ -18,6 +18,7 @@ import ast
 import hashlib
 import json
 import re
+import subprocess
 import sys
 import textwrap
 from collections import Counter, defaultdict
@@ -3902,6 +3903,8 @@ _HELP_TEXT: Final = textwrap.dedent("""\
       --no-cache          Disable file-level caching
       --cache-dir PATH    Custom cache directory (default: .smellcheck-cache)
       --clear-cache       Delete cached results and exit
+      --diff REF          Only scan Python files changed since REF (e.g. main, HEAD~1)
+      --changed-only      Shorthand for --diff HEAD (uncommitted changes)
       --generate-baseline Output a JSON baseline of current findings to stdout
       --baseline PATH     Compare against baseline; only report new findings
       --version           Show version and exit
@@ -3926,13 +3929,79 @@ _HELP_TEXT: Final = textwrap.dedent("""\
       smellcheck src/ --baseline .smellcheck-baseline.json --fail-on warning
       Also configurable: baseline = ".smellcheck-baseline.json" in [tool.smellcheck]
 
+    Diff-aware scanning:
+      Requires git. Only scans files changed since the given ref.
+      Cross-file checks run on the changed file set only (best-effort).
+
     Examples:
       smellcheck src/
       smellcheck myfile.py --format json
       smellcheck src/ --min-severity warning --fail-on warning
       smellcheck src/ --scope file
       smellcheck file1.py file2.py --format github
+      smellcheck src/ --diff main --fail-on warning
+      smellcheck src/ --changed-only
 """)
+
+
+def _get_changed_files(ref: str, paths: list[Path]) -> list[Path]:
+    """Return Python files changed since *ref* that are under *paths*.
+
+    Uses ``git diff --name-only`` to discover changes.  Raises
+    :class:`SystemExit` with a clear message when not inside a git repo
+    or when ``git`` is not available.
+    """
+    # Derive cwd from the first user-supplied path
+    anchor = paths[0] if paths else Path.cwd()
+    work_dir = anchor if anchor.is_dir() else anchor.parent
+
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=ACMR", ref, "--", "*.py"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=work_dir,
+        )
+    except FileNotFoundError:
+        print("Error: --diff requires git, but git was not found on PATH", file=sys.stderr)
+        sys.exit(1)
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        low = stderr.lower()
+        if "not a git repository" in low or "could not access" in low:
+            print("Error: --diff requires a git repository", file=sys.stderr)
+        else:
+            print(f"Error: git diff failed: {stderr}", file=sys.stderr)
+        sys.exit(1)
+
+    if not result.stdout.strip():
+        return []
+
+    # Resolve changed files to absolute paths relative to repo root
+    repo_root_result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=work_dir,
+    )
+    if repo_root_result.returncode != 0:
+        print("Error: could not determine git repository root", file=sys.stderr)
+        sys.exit(1)
+    repo_root = Path(repo_root_result.stdout.strip())
+
+    changed = []
+    resolved_paths = [p.resolve() for p in paths]
+    for line in result.stdout.strip().split("\n"):
+        fpath = (repo_root / line).resolve()
+        if not fpath.exists():
+            continue
+        # Intersect with positional path args
+        if any(fpath == rp or fpath.is_relative_to(rp) for rp in resolved_paths):
+            changed.append(fpath)
+    return changed
 
 
 def _pop_option(args: list[str], flag: str) -> str | None:
@@ -4073,6 +4142,26 @@ def main():
         )
         sys.exit(1)
 
+    # Extract --diff / --changed-only before _parse_args
+    diff_ref = _pop_option(raw_args, "--diff")
+    changed_only = "--changed-only" in raw_args
+    if changed_only:
+        raw_args.remove("--changed-only")
+        if diff_ref is not None:
+            print(
+                "Warning: --changed-only ignored because --diff was also specified",
+                file=sys.stderr,
+            )
+        else:
+            diff_ref = "HEAD"
+
+    if diff_ref is not None and generate_baseline:
+        print(
+            "Error: --diff and --generate-baseline are mutually exclusive",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     paths, output_format, min_severity, fail_on, select, ignore, scope_filter = (
         _parse_args(
             raw_args,
@@ -4091,6 +4180,14 @@ def main():
     # Config fallback for --baseline
     if baseline_path_str is None and not generate_baseline:
         baseline_path_str = config.get("baseline")
+
+    # Apply --diff file filtering
+    if diff_ref is not None:
+        changed_files = _get_changed_files(diff_ref, paths)
+        if not changed_files:
+            print("No changed Python files found.", file=sys.stderr)
+            sys.exit(0)
+        paths = changed_files
 
     # Resolve cache config (CLI overrides pyproject.toml)
     use_cache = not no_cache
