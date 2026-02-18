@@ -12,6 +12,7 @@ from pathlib import Path
 from smellcheck import __version__
 from smellcheck.detector import (
     _DEFAULT_CACHE_DIR,
+    _MAX_EXTENDS_CHAIN_DEPTH,
     _RULE_DESCRIPTIONS,
     _RULE_EXAMPLES,
     _RULE_REGISTRY,
@@ -25,10 +26,12 @@ from smellcheck.detector import (
     _fingerprint,
     _get_changed_files,
     _is_suppressed,
+    _merge_smellcheck_configs,
     _parse_args,
     _parse_block_directives,
     _read_cache,
     _resolve_code,
+    _resolve_extends,
     _serialize_file_data,
     _serialize_finding,
     _write_cache,
@@ -1850,3 +1853,400 @@ def test_cli_format_invalid_rejects():
     assert "invalid format" in result.stderr.lower()
     assert "junit" in result.stderr
     assert "gitlab" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Config extends / inheritance — merge function
+# ---------------------------------------------------------------------------
+
+
+def test_merge_configs_override_select():
+    """Child select replaces parent entirely."""
+    base = {"select": ["SC101", "SC201"]}
+    override = {"select": ["SC701"]}
+    merged = _merge_smellcheck_configs(base, override)
+    assert merged["select"] == ["SC701"]
+
+
+def test_merge_configs_union_ignore():
+    """Ignore lists are unioned and deduplicated."""
+    base = {"ignore": ["SC601", "SC202"]}
+    override = {"ignore": ["SC202", "SC301"]}
+    merged = _merge_smellcheck_configs(base, override)
+    assert merged["ignore"] == ["SC601", "SC202", "SC301"]
+
+
+def test_merge_configs_deep_merge_per_file_ignores():
+    """Per-file-ignores are deep merged: same glob unions codes."""
+    base = {"per-file-ignores": {"tests/*": ["SC201"], "docs/*": ["SC101"]}}
+    override = {"per-file-ignores": {"tests/*": ["SC206", "SC201"], "src/*": ["SC301"]}}
+    merged = _merge_smellcheck_configs(base, override)
+    pfi = merged["per-file-ignores"]
+    assert pfi["tests/*"] == ["SC201", "SC206"]  # union, deduped
+    assert pfi["docs/*"] == ["SC101"]  # from base only
+    assert pfi["src/*"] == ["SC301"]  # from override only
+
+
+def test_merge_configs_scalar_override():
+    """Scalar values (fail-on, format) are overridden by child."""
+    base = {"fail-on": "error", "format": "text"}
+    override = {"fail-on": "warning"}
+    merged = _merge_smellcheck_configs(base, override)
+    assert merged["fail-on"] == "warning"
+    assert merged["format"] == "text"  # kept from base
+
+
+def test_merge_configs_extends_stripped():
+    """The extends key is never present in merged output."""
+    base = {"ignore": ["SC601"], "extends": "grandparent.toml"}
+    override = {"ignore": ["SC202"], "extends": "base.toml"}
+    merged = _merge_smellcheck_configs(base, override)
+    assert "extends" not in merged
+
+
+# ---------------------------------------------------------------------------
+# Config extends / inheritance — resolve function
+# ---------------------------------------------------------------------------
+
+
+def _write_toml(path: Path, content: str) -> Path:
+    path.write_text(textwrap.dedent(content), encoding="utf-8")
+    return path
+
+
+def test_extends_single_file(tmp_path):
+    """Basic single-file inheritance."""
+    _write_toml(tmp_path / "base.toml", """\
+        [tool.smellcheck]
+        ignore = ["SC601"]
+        fail-on = "warning"
+    """)
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = "base.toml"
+        ignore = ["SC202"]
+    """)
+    config = load_config(tmp_path)
+    assert config["fail-on"] == "warning"
+    assert "SC601" in config["ignore"]
+    assert "SC202" in config["ignore"]
+    assert "extends" not in config
+
+
+def test_extends_multiple_files(tmp_path):
+    """List of bases; later wins for scalar values."""
+    _write_toml(tmp_path / "base.toml", """\
+        [tool.smellcheck]
+        fail-on = "error"
+        ignore = ["SC601"]
+    """)
+    _write_toml(tmp_path / "strict.toml", """\
+        [tool.smellcheck]
+        fail-on = "warning"
+        ignore = ["SC202"]
+    """)
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = ["base.toml", "strict.toml"]
+    """)
+    config = load_config(tmp_path)
+    assert config["fail-on"] == "warning"  # strict wins over base
+    assert set(config["ignore"]) == {"SC601", "SC202"}
+
+
+def test_extends_recursive_chain(tmp_path):
+    """Grandparent → parent → project chain."""
+    _write_toml(tmp_path / "grandparent.toml", """\
+        [tool.smellcheck]
+        ignore = ["SC101"]
+        fail-on = "error"
+    """)
+    _write_toml(tmp_path / "parent.toml", """\
+        [tool.smellcheck]
+        extends = "grandparent.toml"
+        ignore = ["SC202"]
+    """)
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = "parent.toml"
+        ignore = ["SC301"]
+    """)
+    config = load_config(tmp_path)
+    assert set(config["ignore"]) == {"SC101", "SC202", "SC301"}
+    assert config["fail-on"] == "error"
+
+
+def test_extends_relative_path(tmp_path):
+    """Paths are resolved relative to the file containing extends."""
+    subdir = tmp_path / "configs"
+    subdir.mkdir()
+    _write_toml(subdir / "base.toml", """\
+        [tool.smellcheck]
+        ignore = ["SC601"]
+    """)
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = "configs/base.toml"
+    """)
+    config = load_config(tmp_path)
+    assert "SC601" in config["ignore"]
+
+
+def test_extends_cycle_detection(tmp_path, capsys):
+    """Circular chain warns to stderr and doesn't loop."""
+    _write_toml(tmp_path / "a.toml", """\
+        [tool.smellcheck]
+        extends = "b.toml"
+        ignore = ["SC101"]
+    """)
+    _write_toml(tmp_path / "b.toml", """\
+        [tool.smellcheck]
+        extends = "a.toml"
+        ignore = ["SC202"]
+    """)
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = "a.toml"
+    """)
+    config = load_config(tmp_path)
+    captured = capsys.readouterr()
+    assert "circular" in captured.err
+    # Should still have the non-circular configs merged
+    assert "extends" not in config
+
+
+def test_extends_depth_limit(tmp_path, capsys):
+    """Chains deeper than _MAX_EXTENDS_CHAIN_DEPTH warn and stop."""
+    # Create a chain deeper than the limit
+    for i in range(_MAX_EXTENDS_CHAIN_DEPTH + 2):
+        name = f"level{i}.toml"
+        if i < _MAX_EXTENDS_CHAIN_DEPTH + 1:
+            next_name = f"level{i + 1}.toml"
+            _write_toml(tmp_path / name, f"""\
+                [tool.smellcheck]
+                extends = "{next_name}"
+                ignore = ["SC{i:03d}"]
+            """)
+        else:
+            _write_toml(tmp_path / name, f"""\
+                [tool.smellcheck]
+                ignore = ["SC{i:03d}"]
+            """)
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = "level0.toml"
+    """)
+    config = load_config(tmp_path)
+    captured = capsys.readouterr()
+    assert "depth limit" in captured.err
+    assert "extends" not in config
+
+
+def test_extends_missing_file_warning(tmp_path, capsys):
+    """Missing base file is skipped with a warning; own config still works."""
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = "nonexistent.toml"
+        ignore = ["SC701"]
+    """)
+    config = load_config(tmp_path)
+    captured = capsys.readouterr()
+    assert "not found" in captured.err
+    assert config["ignore"] == ["SC701"]
+    assert "extends" not in config
+
+
+def test_extends_no_smellcheck_section(tmp_path):
+    """Base file without [tool.smellcheck] is treated as empty config."""
+    _write_toml(tmp_path / "base.toml", """\
+        [tool.other]
+        key = "value"
+    """)
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = "base.toml"
+        ignore = ["SC701"]
+    """)
+    config = load_config(tmp_path)
+    assert config["ignore"] == ["SC701"]
+
+
+def test_extends_invalid_type_warning(tmp_path, capsys):
+    """Non-string/list extends value warns and is ignored."""
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = 42
+        ignore = ["SC701"]
+    """)
+    config = load_config(tmp_path)
+    captured = capsys.readouterr()
+    assert "must be a string or list" in captured.err
+    assert config["ignore"] == ["SC701"]
+    assert "extends" not in config
+
+
+def test_extends_list_non_string_entries(tmp_path, capsys):
+    """Non-string entries in extends list are skipped with a warning."""
+    _write_toml(tmp_path / "base.toml", """\
+        [tool.smellcheck]
+        ignore = ["SC601"]
+    """)
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = [42]
+        ignore = ["SC701"]
+    """)
+    config = load_config(tmp_path)
+    captured = capsys.readouterr()
+    assert "non-empty strings" in captured.err
+    assert config["ignore"] == ["SC701"]
+    assert "extends" not in config
+
+
+def test_extends_absent_no_change(tmp_path):
+    """No extends key preserves existing behavior exactly."""
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        ignore = ["SC601"]
+        fail-on = "warning"
+    """)
+    config = load_config(tmp_path)
+    assert config == {"ignore": ["SC601"], "fail-on": "warning"}
+
+
+def test_extends_e2e_scan(tmp_path):
+    """Inherited ignore actually filters findings in scan_paths."""
+    # base.toml ignores SC701 (mutable default)
+    _write_toml(tmp_path / "base.toml", """\
+        [tool.smellcheck]
+        ignore = ["SC701"]
+    """)
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = "base.toml"
+    """)
+    _write_py(tmp_path, "def foo(x=[]): pass\n")
+    config = load_config(tmp_path)
+    findings = scan_paths([tmp_path], config=config)
+    patterns = [f.pattern for f in findings]
+    assert "SC701" not in patterns
+
+
+def test_extends_empty_string_warning(tmp_path, capsys):
+    """Empty extends string warns and is ignored."""
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = ""
+        ignore = ["SC701"]
+    """)
+    config = load_config(tmp_path)
+    captured = capsys.readouterr()
+    assert "empty" in captured.err
+    assert config["ignore"] == ["SC701"]
+    assert "extends" not in config
+
+
+def test_extends_diamond_dependency(tmp_path):
+    """Diamond deps: both siblings inherit from same base independently."""
+    # common.toml is the shared base
+    _write_toml(tmp_path / "common.toml", """\
+        [tool.smellcheck]
+        ignore = ["SC101"]
+        fail-on = "error"
+    """)
+    # team-base extends common, overrides fail-on
+    _write_toml(tmp_path / "team-base.toml", """\
+        [tool.smellcheck]
+        extends = "common.toml"
+        ignore = ["SC202"]
+    """)
+    # strict also extends common, overrides fail-on
+    _write_toml(tmp_path / "strict.toml", """\
+        [tool.smellcheck]
+        extends = "common.toml"
+        fail-on = "warning"
+        ignore = ["SC301"]
+    """)
+    # project extends both
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = ["team-base.toml", "strict.toml"]
+    """)
+    config = load_config(tmp_path)
+    # All ignores from all branches are unioned
+    assert set(config["ignore"]) == {"SC101", "SC202", "SC301"}
+    # strict.toml is later in the list, so its fail-on wins
+    assert config["fail-on"] == "warning"
+
+
+def test_extends_symlink_cycle_detection(tmp_path, capsys):
+    """Symlinked config files that form a cycle are detected."""
+    _write_toml(tmp_path / "real.toml", """\
+        [tool.smellcheck]
+        ignore = ["SC101"]
+    """)
+    link = tmp_path / "link.toml"
+    try:
+        link.symlink_to(tmp_path / "real.toml")
+    except OSError:
+        import pytest
+        pytest.skip("symlinks not supported on this platform")
+    # real.toml extends link.toml (which is itself), creating a cycle
+    _write_toml(tmp_path / "real.toml", """\
+        [tool.smellcheck]
+        extends = "link.toml"
+        ignore = ["SC101"]
+    """)
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = "real.toml"
+    """)
+    config = load_config(tmp_path)
+    captured = capsys.readouterr()
+    assert "circular" in captured.err
+    assert "SC101" in config.get("ignore", [])
+
+
+def test_extends_path_traversal_allowed(tmp_path):
+    """Path traversal in extends is intentionally allowed (ruff/eslint model)."""
+    subdir = tmp_path / "project"
+    subdir.mkdir()
+    _write_toml(tmp_path / "shared.toml", """\
+        [tool.smellcheck]
+        ignore = ["SC601"]
+    """)
+    _write_toml(subdir / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = "../shared.toml"
+    """)
+    config = load_config(subdir)
+    assert "SC601" in config["ignore"]
+
+
+def test_extends_without_tomllib(tmp_path, monkeypatch):
+    """When tomllib is unavailable, extends is silently skipped."""
+    import smellcheck.detector as det
+    _write_toml(tmp_path / "base.toml", """\
+        [tool.smellcheck]
+        ignore = ["SC601"]
+    """)
+    _write_toml(tmp_path / "pyproject.toml", """\
+        [tool.smellcheck]
+        extends = "base.toml"
+        ignore = ["SC701"]
+    """)
+    monkeypatch.setattr(det, "tomllib", None)
+    config = load_config(tmp_path)
+    # load_config returns {} when tomllib is None
+    assert config == {}
+
+
+def test_merge_per_file_ignores_scalar_codes_warning(capsys):
+    """per-file-ignores with scalar codes value warns and skips."""
+    base = {}
+    override = {"per-file-ignores": {"tests/*": "SC201"}}
+    merged = _merge_smellcheck_configs(base, override)
+    captured = capsys.readouterr()
+    assert "must be a list" in captured.err
+    # The bad glob is skipped; per-file-ignores is still present but empty
+    assert merged.get("per-file-ignores", {}) == {}

@@ -544,7 +544,184 @@ def load_config(target: Path) -> dict:
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     except Exception:
         return {}
-    return dict(data.get("tool", {}).get("smellcheck", {}))
+    config = dict(data.get("tool", {}).get("smellcheck", {}))
+    if "extends" in config:
+        config = _resolve_extends(config, pyproject.resolve())
+    return config
+
+
+# ---------------------------------------------------------------------------
+# Config extends / inheritance
+# ---------------------------------------------------------------------------
+
+_MAX_EXTENDS_CHAIN_DEPTH: Final = 5
+
+
+def _merge_smellcheck_configs(base: dict, override: dict) -> dict:
+    """Merge two smellcheck config dicts with strategy-aware merging.
+
+    - ``select``: override (child replaces parent entirely)
+    - ``ignore``: union (deduplicated, base order preserved, new codes
+      appended — matches ruff/eslint convention)
+    - ``per-file-ignores``: deep merge (same glob → union codes)
+    - scalars (``fail-on``, ``format``, ``baseline``, ``cache``,
+      ``cache-dir``): override (child wins)
+    - ``extends``: consumed & stripped (never appears in output)
+    """
+    merged = dict(base)
+    for key, value in override.items():
+        if key == "extends":
+            continue
+        if key == "ignore":
+            # Union: deduplicated, order-preserved
+            existing = merged.get("ignore", [])
+            seen: set[str] = set(existing)
+            combined = list(existing)
+            for code in value:
+                if code not in seen:
+                    seen.add(code)
+                    combined.append(code)
+            merged["ignore"] = combined
+        elif key == "per-file-ignores":
+            # Deep merge: same glob → union codes
+            if not isinstance(value, dict):
+                print(
+                    "smellcheck: warning: 'per-file-ignores' must be a "
+                    "mapping; skipping",
+                    file=sys.stderr,
+                )
+                continue
+            existing_pfi = dict(merged.get("per-file-ignores", {}))
+            for glob, codes in value.items():
+                if not isinstance(codes, list):
+                    print(
+                        f"smellcheck: warning: 'per-file-ignores' value for "
+                        f"'{glob}' must be a list; skipping",
+                        file=sys.stderr,
+                    )
+                    continue
+                if glob in existing_pfi:
+                    seen_codes: set[str] = set(existing_pfi[glob])
+                    combined_codes = list(existing_pfi[glob])
+                    for c in codes:
+                        if c not in seen_codes:
+                            seen_codes.add(c)
+                            combined_codes.append(c)
+                    existing_pfi[glob] = combined_codes
+                else:
+                    existing_pfi[glob] = list(codes)
+            merged["per-file-ignores"] = existing_pfi
+        else:
+            # select, fail-on, format, baseline, cache, cache-dir: override
+            merged[key] = value
+    # Strip extends from result
+    merged.pop("extends", None)
+    return merged
+
+
+def _resolve_extends(
+    config: dict,
+    config_path: Path,
+    _visited: set[str] | None = None,
+    _depth: int = 0,
+) -> dict:
+    """Recursively resolve ``extends`` directives in smellcheck config.
+
+    *config_path* is the absolute path of the file containing *config*.
+    Paths in ``extends`` are resolved relative to the directory of that file.
+
+    Diamond dependencies are supported: each sibling branch in an extends
+    list gets its own copy of ``_visited`` so shared bases are loaded
+    independently from each path.
+    """
+    if _visited is None:
+        _visited = set()
+
+    extends = config.pop("extends", None)
+    if extends is None:
+        return config
+
+    # Normalize to list and validate entries
+    if isinstance(extends, str):
+        extends_list = [extends] if extends.strip() else []
+        if not extends_list:
+            print(
+                "smellcheck: warning: 'extends' value is empty; ignoring",
+                file=sys.stderr,
+            )
+            return config
+    elif isinstance(extends, list):
+        extends_list = [e for e in extends if isinstance(e, str) and e.strip()]
+        if len(extends_list) != len(extends):
+            print(
+                "smellcheck: warning: 'extends' entries must be non-empty "
+                "strings; skipping invalid entries",
+                file=sys.stderr,
+            )
+        if not extends_list:
+            return config
+    else:
+        print(
+            f"smellcheck: warning: 'extends' must be a string or list, "
+            f"got {type(extends).__name__}; ignoring",
+            file=sys.stderr,
+        )
+        return config
+
+    if _depth >= _MAX_EXTENDS_CHAIN_DEPTH:
+        print(
+            f"smellcheck: warning: extends chain depth limit "
+            f"({_MAX_EXTENDS_CHAIN_DEPTH}) reached; ignoring further extends",
+            file=sys.stderr,
+        )
+        return config
+
+    config_dir = config_path.parent
+    canon = str(config_path)
+    if canon in _visited:
+        print(
+            f"smellcheck: warning: circular extends detected "
+            f"('{config_path.name}'); ignoring",
+            file=sys.stderr,
+        )
+        return config
+    _visited.add(canon)
+
+    # Build merged base from all extends (later entries override earlier)
+    merged_base: dict = {}
+    for ext_path_str in extends_list:
+        ext_path = (config_dir / ext_path_str).resolve()
+        if not ext_path.is_file():
+            print(
+                f"smellcheck: warning: extends file not found: "
+                f"'{ext_path_str}'",
+                file=sys.stderr,
+            )
+            continue
+
+        if tomllib is None:
+            continue
+        try:
+            ext_data = tomllib.loads(ext_path.read_text(encoding="utf-8"))
+        except Exception:
+            print(
+                f"smellcheck: warning: failed to parse '{ext_path_str}'; "
+                f"skipping",
+                file=sys.stderr,
+            )
+            continue
+
+        ext_config = dict(ext_data.get("tool", {}).get("smellcheck", {}))
+        # Recursively resolve if the base itself has extends.
+        # Each sibling gets a copy of _visited to support diamond deps.
+        if "extends" in ext_config:
+            ext_config = _resolve_extends(
+                ext_config, ext_path, set(_visited), _depth + 1
+            )
+        merged_base = _merge_smellcheck_configs(merged_base, ext_config)
+
+    # Merge project's own config on top of the accumulated base
+    return _merge_smellcheck_configs(merged_base, config)
 
 
 # ---------------------------------------------------------------------------
@@ -4046,6 +4223,9 @@ _HELP_TEXT: Final = textwrap.dedent("""\
     Configuration:
       smellcheck reads [tool.smellcheck] from the nearest pyproject.toml.
       CLI flags override config values.
+      Use extends = "base.toml" to inherit from a shared config file.
+      Multiple bases: extends = ["base.toml", "strict.toml"] (later wins).
+      Paths are relative to the file containing the extends key.
 
     Baseline workflow:
       smellcheck src/ --generate-baseline > .smellcheck-baseline.json

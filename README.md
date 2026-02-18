@@ -111,6 +111,7 @@ smellcheck reads `[tool.smellcheck]` from the nearest `pyproject.toml`:
 
 ```toml
 [tool.smellcheck]
+extends = "base.toml"               # inherit from a shared config file
 select = ["SC101", "SC201", "SC701"]  # only run these checks (default: all)
 ignore = ["SC601", "SC202"]          # skip these checks
 per-file-ignores = {"tests/*" = ["SC201", "SC206"]}  # per-path overrides
@@ -122,6 +123,32 @@ cache-dir = ".smellcheck-cache"        # cache directory (default: .smellcheck-c
 ```
 
 CLI flags override config values.
+
+### Config inheritance (`extends`)
+
+Use `extends` to inherit settings from a shared base config:
+
+```toml
+# base.toml — shared across repos
+[tool.smellcheck]
+ignore = ["SC601"]
+fail-on = "warning"
+```
+
+```toml
+# pyproject.toml — project overrides
+[tool.smellcheck]
+extends = "base.toml"
+ignore = ["SC202"]  # adds to base; final ignore = ["SC601", "SC202"]
+```
+
+Multiple bases are supported — later entries override earlier ones for scalar values, while `ignore` lists are unioned and `per-file-ignores` are deep-merged:
+
+```toml
+extends = ["base.toml", "strict.toml"]
+```
+
+Paths are relative to the file containing the `extends` key. Chains are resolved recursively (up to 5 levels deep).
 
 ## Suppression
 
