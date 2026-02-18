@@ -3776,6 +3776,7 @@ def _format_junit(filtered: list[Finding]) -> str:
 
     total_tests = len(filtered)
     total_failures = total_tests  # every finding is a failure
+    cwd = Path.cwd().resolve()
 
     testsuites = ET.Element(
         "testsuites",
@@ -3787,7 +3788,7 @@ def _format_junit(filtered: list[Finding]) -> str:
 
     for filepath, file_findings in sorted(by_file.items()):
         try:
-            rel = Path(filepath).resolve().relative_to(Path.cwd().resolve()).as_posix()
+            rel = Path(filepath).resolve().relative_to(cwd).as_posix()
         except ValueError:
             rel = Path(filepath).name
         classname = rel.replace("/", ".").removesuffix(".py")
@@ -3847,10 +3848,11 @@ _CODECLIMATE_CATEGORY: Final[dict[str, str]] = {
 
 def _format_gitlab(filtered: list[Finding]) -> str:
     """Format findings as GitLab CodeClimate JSON array."""
+    cwd = Path.cwd().resolve()
     issues: list[dict] = []
     for f in filtered:
         try:
-            rel = Path(f.file).resolve().relative_to(Path.cwd().resolve()).as_posix()
+            rel = Path(f.file).resolve().relative_to(cwd).as_posix()
         except ValueError:
             rel = Path(f.file).name
 
@@ -3858,7 +3860,9 @@ def _format_gitlab(filtered: list[Finding]) -> str:
         family = rd.family if rd else "hygiene"
         category = _CODECLIMATE_CATEGORY.get(family, "Style")
 
-        fp_raw = f"{f.pattern}\0{rel}\0{f.line}"
+        # Location-agnostic fingerprint: avoids churn when lines shift.
+        # Uses normalized message to distinguish instances of the same rule.
+        fp_raw = f"{f.pattern}\0{rel}\0{_normalize_message(f.message)}"
         fingerprint = hashlib.md5(fp_raw.encode()).hexdigest()  # noqa: S324
 
         issues.append(
