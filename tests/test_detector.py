@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import textwrap
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from smellcheck import __version__
@@ -1635,3 +1636,217 @@ def test_diff_and_changed_only_warns(tmp_path):
         str(tmp_path), "--diff", "HEAD", "--changed-only", cwd=tmp_path
     )
     assert "ignored" in result.stderr.lower()
+
+
+# ---------------------------------------------------------------------------
+# JUnit XML output format
+# ---------------------------------------------------------------------------
+
+
+def test_junit_valid_xml(tmp_path, capsys):
+    """JUnit output must be well-formed XML."""
+    p = _write_py(tmp_path, "def foo(x=[]): pass\n")
+    findings = scan_path(p)
+    print_findings(findings, output_format="junit")
+    out = capsys.readouterr().out
+    assert out.startswith('<?xml version="1.0"')
+    root = ET.fromstring(out)
+    assert root.tag == "testsuites"
+
+
+def test_junit_structure(tmp_path, capsys):
+    """JUnit has testsuites -> testsuite -> testcase -> failure hierarchy."""
+    p = _write_py(tmp_path, "def foo(x=[]): pass\n")
+    findings = scan_path(p)
+    print_findings(findings, output_format="junit")
+    root = ET.fromstring(capsys.readouterr().out)
+    assert root.attrib["name"] == "smellcheck"
+    suites = root.findall("testsuite")
+    assert len(suites) >= 1
+    ts = suites[0]
+    assert "name" in ts.attrib
+    assert "tests" in ts.attrib
+    cases = ts.findall("testcase")
+    assert len(cases) >= 1
+    tc = cases[0]
+    assert "name" in tc.attrib
+    assert "classname" in tc.attrib
+    failure = tc.find("failure")
+    assert failure is not None
+    assert "message" in failure.attrib
+    assert "type" in failure.attrib
+
+
+def test_junit_file_grouping(tmp_path, capsys):
+    """Each file gets its own testsuite; each finding a testcase."""
+    _write_py(tmp_path, "def foo(x=[]): pass\n", name="a.py")
+    _write_py(tmp_path, "def bar(y={}): pass\n", name="b.py")
+    findings = scan_path(tmp_path)
+    print_findings(findings, output_format="junit")
+    root = ET.fromstring(capsys.readouterr().out)
+    suites = root.findall("testsuite")
+    suite_names = [s.attrib["name"] for s in suites]
+    assert len(suites) >= 2
+    assert any("a.py" in n for n in suite_names)
+    assert any("b.py" in n for n in suite_names)
+
+
+def test_junit_severity_in_failure_type(tmp_path, capsys):
+    """The failure 'type' attribute reflects the finding severity."""
+    p = _write_py(tmp_path, "def foo(x=[]): pass\n")
+    findings = scan_path(p)
+    print_findings(findings, output_format="junit")
+    root = ET.fromstring(capsys.readouterr().out)
+    failures = root.findall(".//failure")
+    types = {f.attrib["type"] for f in failures}
+    assert types <= {"error", "warning", "info"}
+
+
+def test_junit_counts_correct(tmp_path, capsys):
+    """Tests and failures counts match the actual number of findings."""
+    p = _write_py(tmp_path, "def foo(x=[]): pass\n")
+    findings = scan_path(p)
+    print_findings(findings, output_format="junit")
+    root = ET.fromstring(capsys.readouterr().out)
+    total = int(root.attrib["tests"])
+    failures = int(root.attrib["failures"])
+    assert total == failures
+    assert total == len(root.findall(".//testcase"))
+
+
+def test_junit_empty_findings(capsys):
+    """JUnit with no findings produces valid XML with zero counts."""
+    print_findings([], output_format="junit")
+    root = ET.fromstring(capsys.readouterr().out)
+    assert root.attrib["tests"] == "0"
+    assert root.attrib["failures"] == "0"
+    assert root.findall("testsuite") == []
+
+
+def test_cli_format_junit(tmp_path):
+    """CLI --format junit produces valid XML to stdout."""
+    p = _write_py(tmp_path, "def foo(x=[]): pass\n")
+    result = _run_cli(str(p), "--format", "junit")
+    assert result.stdout.startswith('<?xml version="1.0"')
+    root = ET.fromstring(result.stdout)
+    assert root.tag == "testsuites"
+
+
+def test_junit_classname_no_py_suffix(tmp_path, capsys):
+    """Classname strips .py suffix and converts slashes to dots."""
+    p = _write_py(tmp_path, "def foo(x=[]): pass\n")
+    findings = scan_path(p)
+    print_findings(findings, output_format="junit")
+    root = ET.fromstring(capsys.readouterr().out)
+    tc = root.findall(".//testcase")[0]
+    classname = tc.attrib["classname"]
+    assert not classname.endswith(".py")
+    assert "/" not in classname
+
+
+# ---------------------------------------------------------------------------
+# GitLab CodeClimate output format
+# ---------------------------------------------------------------------------
+
+
+def test_gitlab_valid_json_array(tmp_path, capsys):
+    """GitLab output must be a JSON array."""
+    p = _write_py(tmp_path, "def foo(x=[]): pass\n")
+    findings = scan_path(p)
+    print_findings(findings, output_format="gitlab")
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert isinstance(data, list)
+    assert len(data) >= 1
+
+
+def test_gitlab_issue_fields(tmp_path, capsys):
+    """Each CodeClimate issue has the required fields."""
+    p = _write_py(tmp_path, "def foo(x=[]): pass\n")
+    findings = scan_path(p)
+    print_findings(findings, output_format="gitlab")
+    data = json.loads(capsys.readouterr().out)
+    issue = data[0]
+    assert issue["type"] == "issue"
+    assert "check_name" in issue
+    assert "description" in issue
+    assert "categories" in issue
+    assert isinstance(issue["categories"], list)
+    assert "severity" in issue
+    assert "fingerprint" in issue
+    loc = issue["location"]
+    assert "path" in loc
+    assert "lines" in loc
+    assert "begin" in loc["lines"]
+
+
+def test_gitlab_severity_mapping(tmp_path, capsys):
+    """Smellcheck severities map to CodeClimate severities."""
+    p = _write_py(tmp_path, "def foo(x=[]): pass\n")
+    findings = scan_path(p)
+    print_findings(findings, output_format="gitlab")
+    data = json.loads(capsys.readouterr().out)
+    severities = {d["severity"] for d in data}
+    assert severities <= {"critical", "major", "minor"}
+    # SC701 is error → critical
+    sc701 = [d for d in data if d["check_name"] == "SC701"]
+    if sc701:
+        assert sc701[0]["severity"] == "critical"
+
+
+def test_gitlab_category_mapping(tmp_path, capsys):
+    """Families map to CodeClimate categories."""
+    p = _write_py(tmp_path, "def foo(x=[]): pass\n")
+    findings = scan_path(p)
+    print_findings(findings, output_format="gitlab")
+    data = json.loads(capsys.readouterr().out)
+    categories = {cat for d in data for cat in d["categories"]}
+    assert categories <= {"Style", "Complexity", "Bug Risk", "Duplication"}
+
+
+def test_gitlab_fingerprint_stable(tmp_path, capsys):
+    """Same finding produces the same fingerprint across calls."""
+    p = _write_py(tmp_path, "def foo(x=[]): pass\n")
+    findings = scan_path(p)
+    print_findings(findings, output_format="gitlab")
+    fp1 = json.loads(capsys.readouterr().out)[0]["fingerprint"]
+    print_findings(findings, output_format="gitlab")
+    fp2 = json.loads(capsys.readouterr().out)[0]["fingerprint"]
+    assert fp1 == fp2
+    assert len(fp1) == 32  # md5 hex digest
+
+
+def test_gitlab_relative_paths(tmp_path, capsys):
+    """Paths in GitLab output are relative, not absolute."""
+    p = _write_py(tmp_path, "def foo(x=[]): pass\n")
+    findings = scan_path(p)
+    print_findings(findings, output_format="gitlab")
+    data = json.loads(capsys.readouterr().out)
+    for issue in data:
+        assert not issue["location"]["path"].startswith("/")
+
+
+def test_gitlab_empty_findings(capsys):
+    """Empty findings produce an empty JSON array."""
+    print_findings([], output_format="gitlab")
+    data = json.loads(capsys.readouterr().out)
+    assert data == []
+
+
+def test_cli_format_gitlab(tmp_path):
+    """CLI --format gitlab produces valid CodeClimate JSON."""
+    p = _write_py(tmp_path, "def foo(x=[]): pass\n")
+    result = _run_cli(str(p), "--format", "gitlab")
+    data = json.loads(result.stdout)
+    assert isinstance(data, list)
+    assert len(data) >= 1
+    assert data[0]["type"] == "issue"
+
+
+def test_cli_format_invalid_rejects():
+    """Unknown format values are rejected with a clear error."""
+    result = _run_cli(".", "--format", "csv")
+    assert result.returncode != 0
+    assert "invalid format" in result.stderr.lower()
+    assert "junit" in result.stderr
+    assert "gitlab" in result.stderr

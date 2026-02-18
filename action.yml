@@ -18,7 +18,7 @@ inputs:
     required: false
     default: 'info'
   format:
-    description: 'Output format: text | json | github | sarif'
+    description: 'Output format: text | json | github | sarif | junit | gitlab'
     required: false
     default: 'github'
   diff:
