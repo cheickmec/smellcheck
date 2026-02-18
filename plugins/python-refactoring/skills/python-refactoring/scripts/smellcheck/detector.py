@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 import textwrap
+import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -3765,6 +3766,118 @@ def _format_sarif(filtered: list[Finding]) -> str:
     return json.dumps(sarif, indent=2)
 
 
+# -- JUnit XML -----------------------------------------------------------------
+
+def _format_junit(filtered: list[Finding]) -> str:
+    """Format findings as JUnit XML (one testsuite per file, one testcase per finding)."""
+    by_file: dict[str, list[Finding]] = defaultdict(list)
+    for f in filtered:
+        by_file[f.file].append(f)
+
+    total_tests = len(filtered)
+    total_failures = total_tests  # every finding is a failure
+
+    testsuites = ET.Element(
+        "testsuites",
+        name="smellcheck",
+        tests=str(total_tests),
+        failures=str(total_failures),
+        errors="0",
+    )
+
+    for filepath, file_findings in sorted(by_file.items()):
+        try:
+            rel = Path(filepath).resolve().relative_to(Path.cwd().resolve()).as_posix()
+        except ValueError:
+            rel = Path(filepath).name
+        classname = rel.replace("/", ".").removesuffix(".py")
+
+        ts = ET.SubElement(
+            testsuites,
+            "testsuite",
+            name=rel,
+            tests=str(len(file_findings)),
+            failures=str(len(file_findings)),
+            errors="0",
+        )
+
+        for f in sorted(file_findings, key=lambda x: x.line):
+            tc = ET.SubElement(
+                ts,
+                "testcase",
+                name=f"{f.pattern} {f.name}",
+                classname=classname,
+            )
+            fail_msg = f"{f.pattern} {f.severity}: {f.message}"
+            fail_body = (
+                f"file: {rel}\n"
+                f"line: {f.line}\n"
+                f"pattern: {f.pattern}\n"
+                f"severity: {f.severity}\n"
+                f"message: {f.message}"
+            )
+            fail_el = ET.SubElement(tc, "failure", message=fail_msg, type=f.severity)
+            fail_el.text = fail_body
+
+    ET.indent(testsuites, space="  ")
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
+        testsuites, encoding="unicode"
+    )
+
+
+# -- GitLab CodeClimate --------------------------------------------------------
+
+_CODECLIMATE_SEVERITY: Final = {
+    "error": "critical",
+    "warning": "major",
+    "info": "minor",
+}
+
+_CODECLIMATE_CATEGORY: Final[dict[str, str]] = {
+    "state": "Style",
+    "types": "Style",
+    "architecture": "Style",
+    "functions": "Complexity",
+    "control": "Complexity",
+    "metrics": "Complexity",
+    "hygiene": "Style",
+    "idioms": "Bug Risk",
+}
+
+
+def _format_gitlab(filtered: list[Finding]) -> str:
+    """Format findings as GitLab CodeClimate JSON array."""
+    issues: list[dict] = []
+    for f in filtered:
+        try:
+            rel = Path(f.file).resolve().relative_to(Path.cwd().resolve()).as_posix()
+        except ValueError:
+            rel = Path(f.file).name
+
+        rd = _RULE_REGISTRY.get(f.pattern)
+        family = rd.family if rd else "hygiene"
+        category = _CODECLIMATE_CATEGORY.get(family, "Style")
+
+        fp_raw = f"{f.pattern}\0{rel}\0{f.line}"
+        fingerprint = hashlib.md5(fp_raw.encode()).hexdigest()  # noqa: S324
+
+        issues.append(
+            {
+                "type": "issue",
+                "check_name": f.pattern,
+                "description": f"{f.name}: {f.message}",
+                "categories": [category],
+                "severity": _CODECLIMATE_SEVERITY.get(f.severity, "minor"),
+                "fingerprint": fingerprint,
+                "location": {
+                    "path": rel,
+                    "lines": {"begin": f.line},
+                },
+            }
+        )
+    return json.dumps(issues, indent=2)
+
+
 def print_findings(
     findings: list[Finding],
     use_json: bool = False,
@@ -3777,7 +3890,8 @@ def print_findings(
     Parameters
     ----------
     output_format:
-        ``"text"`` (default), ``"json"``, ``"github"``, or ``"sarif"``.
+        ``"text"`` (default), ``"json"``, ``"github"``, ``"sarif"``,
+        ``"junit"``, or ``"gitlab"``.
         When *None*, falls back to ``use_json`` for backward compatibility.
     """
     fmt = output_format or ("json" if use_json else "text")
@@ -3790,6 +3904,10 @@ def print_findings(
         _print_github_annotations(filtered)
     elif fmt == "sarif":
         print(_format_sarif(filtered))
+    elif fmt == "junit":
+        print(_format_junit(filtered))
+    elif fmt == "gitlab":
+        print(_format_gitlab(filtered))
     elif not filtered:
         print(f"{BOLD}No code smells found.{RESET}")
     else:
@@ -3890,7 +4008,8 @@ _HELP_TEXT: Final = textwrap.dedent("""\
       - 5 OO metrics (LCOM, CBO, …)   — SC8xx        (scope: metric)
 
     Options:
-      --format FMT        Output format: text | json | github | sarif (default: text)
+      --format FMT        Output format: text | json | github | sarif | junit | gitlab
+                          (default: text)
       --json              Deprecated alias for --format json
       --fail-on SEV       Exit 1 if any finding >= SEV: info | warning | error
                           (default: error)
@@ -3939,6 +4058,8 @@ _HELP_TEXT: Final = textwrap.dedent("""\
       smellcheck src/ --min-severity warning --fail-on warning
       smellcheck src/ --scope file
       smellcheck file1.py file2.py --format github
+      smellcheck src/ --format junit > smellcheck-results.xml
+      smellcheck src/ --format gitlab > gl-code-quality-report.json
       smellcheck src/ --diff main --fail-on warning
       smellcheck src/ --changed-only
 """)
@@ -4045,9 +4166,9 @@ def _parse_args(
         args.remove("--json")
         output_format = "json"
 
-    if output_format not in {"text", "json", "github", "sarif"}:
+    if output_format not in {"text", "json", "github", "sarif", "junit", "gitlab"}:
         print(
-            f"Error: invalid format '{output_format}' -- must be one of: text, json, github, sarif",
+            f"Error: invalid format '{output_format}' -- must be one of: text, json, github, sarif, junit, gitlab",
             file=sys.stderr,
         )
         sys.exit(1)

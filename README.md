@@ -58,6 +58,12 @@ smellcheck src/ --format github
 # SARIF output (for GitHub Code Scanning)
 smellcheck src/ --format sarif > results.sarif
 
+# JUnit XML output (for Jenkins, GitLab, CircleCI, Azure DevOps)
+smellcheck src/ --format junit > smellcheck-results.xml
+
+# GitLab CodeClimate output (for MR code quality widget)
+smellcheck src/ --format gitlab > gl-code-quality-report.json
+
 # Filter by severity
 smellcheck src/ --min-severity warning
 
@@ -254,7 +260,7 @@ cache-dir = ".smellcheck-cache"  # custom cache directory
 - **56 automated smell checks** -- per-file AST analysis, cross-file dependency analysis, and OO metrics
 - **83 refactoring patterns** -- numbered catalog with before/after examples, trade-offs, and severity levels
 - **Zero dependencies** -- stdlib-only, runs on any Python 3.10+ installation
-- **Multiple output formats** -- text (terminal), JSON (machine-readable), GitHub annotations (CI), SARIF 2.1.0 (Code Scanning)
+- **Multiple output formats** -- text (terminal), JSON (machine-readable), GitHub annotations (CI), SARIF 2.1.0 (Code Scanning), JUnit XML (Jenkins/GitLab/CircleCI), GitLab CodeClimate (MR quality widget)
 - **Configurable** -- pyproject.toml config, inline suppression, CLI overrides
 - **Baseline support** -- adopt incrementally by suppressing existing findings and only failing on new ones
 - **File-level caching** -- content-hash based caching skips unchanged files for fast repeated scans
