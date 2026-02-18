@@ -3806,7 +3806,7 @@ def _format_junit(filtered: list[Finding]) -> str:
             tc = ET.SubElement(
                 ts,
                 "testcase",
-                name=f"{f.pattern} {f.name}",
+                name=f"{f.pattern} {f.name} [line {f.line}]",
                 classname=classname,
             )
             fail_msg = f"{f.pattern} {f.severity}: {f.message}"
