@@ -18,6 +18,11 @@
           "jsonpath": "$.plugins[0].version"
         },
         {
+          "type": "json",
+          "path": "plugins/python-refactoring/.claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        },
+        {
           "type": "generic",
           "path": "plugins/python-refactoring/skills/python-refactoring/scripts/smellcheck/__init__.py"
         }

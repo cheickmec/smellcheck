@@ -4,6 +4,7 @@ All of these must agree:
   - pyproject.toml          [project] version
   - .release-please-manifest.json  "."
   - .claude-plugin/marketplace.json  metadata.version + plugins[0].version
+  - plugins/python-refactoring/.claude-plugin/plugin.json  version
   - smellcheck.__version__  (importlib.metadata, derived from pyproject.toml)
 """
 
@@ -74,7 +75,11 @@ def _collect() -> list[tuple[str, str]]:
     # 4. marketplace.json — plugins[0].version
     sources.append(("marketplace.json plugins[0].version", mp["plugins"][0]["version"]))
 
-    # 5. Runtime __version__
+    # 5. plugin.json — version
+    pj = _read_json("plugins/python-refactoring/.claude-plugin/plugin.json")
+    sources.append(("plugin.json version", pj["version"]))
+
+    # 6. Runtime __version__
     from smellcheck import __version__
     sources.append(("smellcheck.__version__", __version__))
 
