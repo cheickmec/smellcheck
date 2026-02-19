@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.4](https://github.com/cheickmec/smellcheck/compare/v0.3.3...v0.3.4) (2026-02-19)
+
+
+### Features
+
+* add config `extends` for shared config inheritance ([c36094d](https://github.com/cheickmec/smellcheck/commit/c36094d0f9c7f279a96bdbf9c11b01757a5211ab)), closes [#10](https://github.com/cheickmec/smellcheck/issues/10)
+* add JUnit XML and GitLab CodeClimate output formats ([695b22d](https://github.com/cheickmec/smellcheck/commit/695b22d188750ac337681d6e0b08c8ff1626b37e))
+
+
+### Bug Fixes
+
+* disambiguate JUnit testcase names with line number ([02a5b9d](https://github.com/cheickmec/smellcheck/commit/02a5b9d7456584f2f0e4bfa7dda54959ae23be3e))
+* use location-agnostic fingerprints in GitLab format ([7e96077](https://github.com/cheickmec/smellcheck/commit/7e96077d725caa2d9a8c59f0d0c695fb5c4c8d4b))
+
 ## [0.3.3](https://github.com/cheickmec/smellcheck/compare/v0.3.2...v0.3.3) (2026-02-14)
 
 
