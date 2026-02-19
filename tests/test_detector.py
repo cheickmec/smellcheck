@@ -2223,6 +2223,22 @@ def test_extends_path_traversal_allowed(tmp_path):
     assert "SC601" in config["ignore"]
 
 
+def test_extends_absolute_path(tmp_path):
+    """Absolute paths in extends work correctly."""
+    base = tmp_path / "base.toml"
+    _write_toml(base, """\
+        [tool.smellcheck]
+        ignore = ["SC601"]
+    """)
+    _write_toml(tmp_path / "pyproject.toml", f"""\
+        [tool.smellcheck]
+        extends = "{base.resolve().as_posix()}"
+    """)
+    config = load_config(tmp_path)
+    assert "SC601" in config["ignore"]
+    assert "extends" not in config
+
+
 def test_extends_without_tomllib(tmp_path, monkeypatch):
     """When tomllib is unavailable, extends is silently skipped."""
     import smellcheck.detector as det
