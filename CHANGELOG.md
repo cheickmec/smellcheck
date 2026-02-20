@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.6](https://github.com/cheickmec/smellcheck/compare/v0.3.5...v0.3.6) (2026-02-20)
+
+
+### Features
+
+* add Cursor native plugin for python-refactoring ([7729306](https://github.com/cheickmec/smellcheck/commit/7729306bbb01b3511b445a6df90c79a8344e22e3))
+
 ## [0.3.5](https://github.com/cheickmec/smellcheck/compare/v0.3.4...v0.3.5) (2026-02-19)
 
 
