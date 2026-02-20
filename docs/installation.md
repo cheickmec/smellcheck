@@ -110,6 +110,15 @@ npx ai-agent-skills install cheickmec/smellcheck
 
 ### Cursor
 
+**Option A — Native plugin (recommended)**  
+Install the Cursor plugin so the skill and rules are discovered automatically:
+
+- In Cursor: **Settings → Plugins → Add plugin from folder** and choose the `plugins/python-refactoring` directory from a clone of this repo, or
+- If published to the Cursor plugin marketplace: **Settings → Plugins** and search for "Python Refactoring" / "python-refactoring".
+
+The plugin provides the `python-refactoring` skill and an optional rule that applies when editing Python files.
+
+**Option B — Skill only**  
 Copy the skill directory into your project's `.cursor/skills/` folder:
 
 ```bash
@@ -119,7 +128,7 @@ cp -r /tmp/smellcheck/plugins/python-refactoring/skills/python-refactoring .curs
 rm -rf /tmp/smellcheck
 ```
 
-Restart Cursor -- the agent auto-discovers skills in `.cursor/skills/`.
+Restart Cursor — the agent auto-discovers skills in `.cursor/skills/`.
 
 For global installation (all projects), copy to `~/.cursor/skills/` instead.
 
