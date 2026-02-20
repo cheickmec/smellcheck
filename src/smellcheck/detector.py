@@ -404,6 +404,280 @@ _RULE_EXAMPLES: dict[str, tuple[str, str] | None] = {
 }
 # fmt: on
 
+# ---------------------------------------------------------------------------
+# Refactoring phases: ordered groups of rules for guided refactoring workflow
+# ---------------------------------------------------------------------------
+
+_REFACTORING_PHASES: tuple[dict, ...] = (
+    {
+        "name": "correctness",
+        "label": "Phase 0 — Correctness",
+        "description": "Fix exception handling and mutable-default bugs before any structural work.",
+        "rules": ["SC602", "SC701", "SC605"],
+        "execution": "parallel",
+        "internal_order": [],
+        "gate": "tests_pass",
+        "rescan_after": False,
+        "feedback_to": None,
+        "max_loops": None,
+    },
+    {
+        "name": "dead_code",
+        "label": "Phase 1 — Dead Code",
+        "description": "Remove dead code and unused parameters to reduce noise for later phases.",
+        "rules": ["SC401", "SC208"],
+        "execution": "parallel",
+        "internal_order": [],
+        "gate": None,
+        "rescan_after": True,
+        "feedback_to": None,
+        "max_loops": None,
+    },
+    {
+        "name": "clarity",
+        "label": "Phase 2 — Clarity",
+        "description": "Rename variables, extract constants, and improve string handling for readability.",
+        "rules": ["SC202", "SC102", "SC601", "SC603", "SC305"],
+        "execution": "parallel",
+        "internal_order": [],
+        "gate": None,
+        "rescan_after": False,
+        "feedback_to": None,
+        "max_loops": None,
+    },
+    {
+        "name": "idioms",
+        "label": "Phase 3 — Idioms",
+        "description": "Apply Pythonic idioms: context managers, pipelines, async fixes.",
+        "rules": [
+            "SC702", "SC604", "SC703", "SC209", "SC403", "SC406",
+            "SC405", "SC407", "SC107", "SC205",
+        ],
+        "execution": "parallel",
+        "internal_order": [["SC702", "SC604"], ["SC403", "SC406"]],
+        "gate": None,
+        "rescan_after": False,
+        "feedback_to": None,
+        "max_loops": None,
+    },
+    {
+        "name": "control_flow",
+        "label": "Phase 4 — Control Flow",
+        "description": "Flatten nesting, decompose conditionals, reduce cyclomatic complexity.",
+        "rules": ["SC402", "SC404", "SC210", "SC302"],
+        "execution": "sequential",
+        "internal_order": [["SC402", "SC404", "SC210", "SC302"]],
+        "gate": None,
+        "rescan_after": False,
+        "feedback_to": None,
+        "max_loops": None,
+    },
+    {
+        "name": "functions",
+        "label": "Phase 5 — Functions",
+        "description": "Extract methods, reify parameters, separate queries from modifiers.",
+        "rules": ["SC201", "SC206", "SC203", "SC207", "SC204"],
+        "execution": "parallel",
+        "internal_order": [["SC201"]],
+        "gate": None,
+        "rescan_after": False,
+        "feedback_to": None,
+        "max_loops": None,
+    },
+    {
+        "name": "state_class",
+        "label": "Phase 6 — State & Class Design",
+        "description": "Refactor setters, singletons, lazy classes, and class structure.",
+        "rules": [
+            "SC101", "SC104", "SC103", "SC105", "SC106",
+            "SC303", "SC304", "SC306", "SC307",
+        ],
+        "execution": "parallel",
+        "internal_order": [["SC101", "SC104", "SC103"], ["SC106", "SC303"]],
+        "gate": None,
+        "rescan_after": False,
+
+        "feedback_to": None,
+        "max_loops": None,
+    },
+    {
+        "name": "architecture",
+        "label": "Phase 7 — Architecture",
+        "description": "Break cycles, split god modules, fix cross-file coupling and duplication.",
+        "rules": [
+            "SC503", "SC504", "SC606", "SC505", "SC501", "SC502",
+            "SC506", "SC507", "SC508", "SC211", "SC308", "SC309", "SC301",
+        ],
+        "execution": "parallel",
+        "internal_order": [["SC503", "SC504", "SC606", "SC505"]],
+        "gate": None,
+        "rescan_after": False,
+        "feedback_to": None,
+        "max_loops": None,
+    },
+    {
+        "name": "metrics",
+        "label": "Phase 8 — OO Metrics",
+        "description": "Address cohesion, coupling, fan-out, and middle-man metrics.",
+        "rules": ["SC801", "SC802", "SC803", "SC804", "SC805"],
+        "execution": "parallel",
+        "internal_order": [],
+        "gate": None,
+        "rescan_after": False,
+
+        "feedback_to": 6,
+        "max_loops": 2,
+    },
+)
+
+
+def _build_rule_to_phase() -> dict[str, int]:
+    mapping: dict[str, int] = {}
+    for idx, phase in enumerate(_REFACTORING_PHASES):
+        for code in phase["rules"]:
+            mapping[code] = idx
+    return mapping
+
+
+_RULE_TO_PHASE: dict[str, int] = _build_rule_to_phase()
+
+
+# ---------------------------------------------------------------------------
+# Plan computation helpers
+# ---------------------------------------------------------------------------
+
+
+def _group_findings_by_phase(
+    findings: list["Finding"],
+) -> dict[int, list["Finding"]]:
+    """Bucket findings by their refactoring phase index."""
+    groups: dict[int, list["Finding"]] = {}
+    for f in findings:
+        phase_idx = _RULE_TO_PHASE.get(f.pattern)
+        if phase_idx is not None:
+            groups.setdefault(phase_idx, []).append(f)
+    return groups
+
+
+def _compute_plan(findings: list["Finding"]) -> dict:
+    """Build a phased refactoring plan from a list of findings."""
+    grouped = _group_findings_by_phase(findings)
+
+    # Determine strategy: architecture_first if >30% cross-file/metric findings
+    cross_file_count = sum(
+        1 for f in findings
+        if _RULE_REGISTRY.get(f.pattern, RuleDef("", "", "", "", "")).scope
+        in ("cross_file", "metric")
+    )
+    total = len(findings) or 1
+    strategy = (
+        "architecture_first" if cross_file_count / total > 0.30 else "local_first"
+    )
+
+    num_phases = len(_REFACTORING_PHASES)
+    phase_order = (
+        [0, 1, 7, 8, 2, 3, 4, 5, 6] if strategy == "architecture_first"
+        else list(range(num_phases))
+    )
+
+    phases_out: list[dict] = []
+    total_rules_hit: set[str] = set()
+    for idx in range(num_phases):
+        phase_def = _REFACTORING_PHASES[idx]
+        phase_findings = grouped.get(idx, [])
+        rules_hit: dict[str, int] = {}
+        for f in phase_findings:
+            rules_hit[f.pattern] = rules_hit.get(f.pattern, 0) + 1
+            total_rules_hit.add(f.pattern)
+
+        # Determine skip status
+        status = "active"
+        skip_reason = None
+        if not phase_findings:
+            status = "skip"
+            skip_reason = "no findings"
+
+        phases_out.append({
+            "number": idx,
+            "name": phase_def["name"],
+            "label": phase_def["label"],
+            "description": phase_def["description"],
+            "status": status,
+            "skip_reason": skip_reason,
+            "finding_count": len(phase_findings),
+            "rules_hit": rules_hit,
+            "select_cmd": ",".join(phase_def["rules"]),
+            "execution": phase_def["execution"],
+            "internal_order": phase_def["internal_order"],
+            "gate": phase_def["gate"],
+            "rescan_after": phase_def["rescan_after"],
+            "feedback_to": phase_def["feedback_to"],
+            "max_loops": phase_def["max_loops"],
+        })
+
+    return {
+        "strategy": strategy,
+        "phase_order": phase_order,
+        "total_findings": len(findings),
+        "total_rules_hit": len(total_rules_hit),
+        "phases": phases_out,
+    }
+
+
+def _format_plan_text(plan: dict) -> str:
+    """Render a refactoring plan as human-readable text."""
+    lines: list[str] = []
+    lines.append(f"Refactoring Plan  ({plan['total_findings']} findings, "
+                 f"{plan['total_rules_hit']} rules, strategy: {plan['strategy']})")
+    lines.append("=" * len(lines[0]))
+    lines.append("")
+
+    for idx in plan["phase_order"]:
+        phase = plan["phases"][idx]
+        if phase["status"] == "skip":
+            lines.append(f"  {phase['label']}  [SKIP — {phase['skip_reason']}]")
+            continue
+
+        lines.append(f"  {phase['label']}  ({phase['finding_count']} findings)")
+        lines.append(f"    {phase['description']}")
+
+        # Rules hit
+        parts = [f"{code}({n})" for code, n in sorted(phase["rules_hit"].items())]
+        lines.append(f"    Rules: {', '.join(parts)}")
+
+        # Execution and chains
+        lines.append(f"    Execution: {phase['execution']}")
+        if phase["internal_order"]:
+            for chain in phase["internal_order"]:
+                lines.append(f"    Chain: {' -> '.join(chain)}")
+
+        # Gate / rescan / feedback
+        if phase["gate"]:
+            lines.append(f"    Gate: {phase['gate']}")
+        if phase["rescan_after"]:
+            lines.append("    Rescan after this phase")
+        if phase["feedback_to"] is not None:
+            target = _REFACTORING_PHASES[phase["feedback_to"]]["label"]
+            # Under architecture_first, phase 8 runs before phase 6,
+            # so the relationship is forward ("feeds into") not a loop.
+            order = plan["phase_order"]
+            src_pos = order.index(phase["number"])
+            tgt_pos = order.index(phase["feedback_to"])
+            verb = "Feeds into" if tgt_pos > src_pos else "Feedback to"
+            suffix = f" (max {phase['max_loops']} loops)" if verb == "Feedback to" else ""
+            lines.append(f"    {verb} {target}{suffix}")
+
+        # Ready-to-use command
+        lines.append(f"    Run: smellcheck <path> --select {phase['select_cmd']}")
+        lines.append("")
+
+    return "\n".join(lines) + "\n"
+
+
+def _format_plan_json(plan: dict) -> str:
+    """Render a refactoring plan as JSON."""
+    return json.dumps(plan, indent=2)
+
 
 @dataclass
 class Finding:
@@ -4205,6 +4479,8 @@ _HELP_TEXT: Final = textwrap.dedent("""\
       --clear-cache       Delete cached results and exit
       --diff REF          Only scan Python files changed since REF (e.g. main, HEAD~1)
       --changed-only      Shorthand for --diff HEAD (uncommitted changes)
+      --plan              Show a phased refactoring plan and exit.
+                          Use --select with the printed codes to run one phase.
       --generate-baseline Output a JSON baseline of current findings to stdout
       --baseline PATH     Compare against baseline; only report new findings
       --version           Show version and exit
@@ -4246,6 +4522,8 @@ _HELP_TEXT: Final = textwrap.dedent("""\
       smellcheck src/ --format gitlab > gl-code-quality-report.json
       smellcheck src/ --diff main --fail-on warning
       smellcheck src/ --changed-only
+      smellcheck src/ --plan
+      smellcheck src/ --plan --format json
 """)
 
 
@@ -4462,6 +4740,11 @@ def main():
         else:
             diff_ref = "HEAD"
 
+    # Extract --plan before _parse_args
+    plan_mode = "--plan" in raw_args
+    if plan_mode:
+        raw_args.remove("--plan")
+
     if diff_ref is not None and generate_baseline:
         print(
             "Error: --diff and --generate-baseline are mutually exclusive",
@@ -4530,6 +4813,15 @@ def main():
             f"{len(findings)} new findings (baseline: {suppressed} suppressed)",
             file=sys.stderr,
         )
+
+    # --plan: compute and display refactoring plan, then exit
+    if plan_mode:
+        plan = _compute_plan(findings)
+        if output_format == "json":
+            print(_format_plan_json(plan))
+        else:
+            print(_format_plan_text(plan), end="")
+        sys.exit(0)
 
     print_findings(findings, min_severity=min_severity, output_format=output_format)
 

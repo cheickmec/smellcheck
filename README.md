@@ -103,6 +103,10 @@ smellcheck --explain SC4
 
 # List all rules grouped by family
 smellcheck --explain all
+
+# Generate a phased refactoring plan
+smellcheck src/ --plan
+smellcheck src/ --plan --format json
 ```
 
 ## Configuration

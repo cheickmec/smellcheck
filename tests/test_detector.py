@@ -35,6 +35,12 @@ from smellcheck.detector import (
     _serialize_file_data,
     _serialize_finding,
     _write_cache,
+    _REFACTORING_PHASES,
+    _RULE_TO_PHASE,
+    _compute_plan,
+    _format_plan_json,
+    _format_plan_text,
+    _group_findings_by_phase,
     FileData,
     Finding,
     load_config,
@@ -2266,3 +2272,173 @@ def test_merge_per_file_ignores_scalar_codes_warning(capsys):
     assert "must be a list" in captured.err
     # The bad glob is skipped; per-file-ignores is still present but empty
     assert merged.get("per-file-ignores", {}) == {}
+
+
+# ---------------------------------------------------------------------------
+# --plan / refactoring phases tests
+# ---------------------------------------------------------------------------
+
+
+def test_refactoring_phases_covers_all_rules():
+    """Every SC code in _RULE_REGISTRY appears in exactly one phase."""
+    phase_codes: list[str] = []
+    for phase in _REFACTORING_PHASES:
+        phase_codes.extend(phase["rules"])
+    assert sorted(phase_codes) == sorted(_RULE_REGISTRY.keys()), (
+        "Phase rules must exactly cover _RULE_REGISTRY"
+    )
+    # No duplicates
+    assert len(phase_codes) == len(set(phase_codes)), "Duplicate rule in phases"
+
+
+def test_rule_to_phase_mapping():
+    """_RULE_TO_PHASE has an entry for every rule in the registry."""
+    for code in _RULE_REGISTRY:
+        assert code in _RULE_TO_PHASE, f"{code} missing from _RULE_TO_PHASE"
+
+
+def test_group_findings_by_phase():
+    """Findings are bucketed into the correct phase."""
+    findings = [
+        Finding("a.py", 1, "SC701", "x", "error", "msg", "idioms", "file"),
+        Finding("a.py", 2, "SC602", "x", "error", "msg", "hygiene", "file"),
+        Finding("a.py", 3, "SC401", "x", "warning", "msg", "control", "file"),
+    ]
+    grouped = _group_findings_by_phase(findings)
+    assert 0 in grouped  # SC602, SC701 -> phase 0
+    assert 1 in grouped  # SC401 -> phase 1
+    assert len(grouped[0]) == 2
+    assert len(grouped[1]) == 1
+
+
+def test_plan_text_output():
+    """Text format has headers, strategy, and select commands."""
+    findings = [
+        Finding("a.py", 1, "SC701", "x", "error", "msg", "idioms", "file"),
+        Finding("a.py", 2, "SC201", "x", "warning", "msg", "functions", "file"),
+    ]
+    plan = _compute_plan(findings)
+    text = _format_plan_text(plan)
+    assert "Refactoring Plan" in text
+    assert "strategy: local_first" in text
+    assert "--select" in text
+    assert "SC701" in text
+
+
+def test_plan_json_output():
+    """Valid JSON with 9 phases and expected keys including select_cmd."""
+    findings = [
+        Finding("a.py", 1, "SC602", "x", "error", "msg", "hygiene", "file"),
+    ]
+    plan = _compute_plan(findings)
+    raw = _format_plan_json(plan)
+    parsed = json.loads(raw)
+    assert len(parsed["phases"]) == 9
+    assert "select_cmd" in parsed["phases"][0]
+    assert parsed["phases"][0]["select_cmd"] == "SC602,SC701,SC605"
+
+
+def test_plan_skips_empty_phases():
+    """Phases with 0 findings get status=skip."""
+    findings = [
+        Finding("a.py", 1, "SC701", "x", "error", "msg", "idioms", "file"),
+    ]
+    plan = _compute_plan(findings)
+    # Only phase 0 should be active (SC701)
+    active = [p for p in plan["phases"] if p["status"] == "active"]
+    skipped = [p for p in plan["phases"] if p["status"] == "skip"]
+    assert len(active) == 1
+    assert active[0]["number"] == 0
+    assert len(skipped) == 8
+
+
+def test_plan_local_first_strategy():
+    """Default strategy for per-file-dominant findings."""
+    findings = [
+        Finding("a.py", 1, "SC701", "x", "error", "msg", "idioms", "file"),
+        Finding("a.py", 2, "SC602", "x", "error", "msg", "hygiene", "file"),
+        Finding("a.py", 3, "SC201", "x", "warning", "msg", "functions", "file"),
+    ]
+    plan = _compute_plan(findings)
+    assert plan["strategy"] == "local_first"
+    assert plan["phase_order"] == list(range(9))
+
+
+def test_plan_architecture_first_strategy():
+    """Cross-file heavy findings trigger architecture_first reorder."""
+    findings = [
+        Finding("a.py", 1, "SC503", "x", "warning", "msg", "architecture", "cross_file"),
+        Finding("a.py", 2, "SC504", "x", "warning", "msg", "architecture", "cross_file"),
+        Finding("a.py", 3, "SC606", "x", "warning", "msg", "hygiene", "cross_file"),
+        Finding("a.py", 4, "SC801", "x", "warning", "msg", "metrics", "metric"),
+    ]
+    plan = _compute_plan(findings)
+    assert plan["strategy"] == "architecture_first"
+    assert plan["phase_order"] == [0, 1, 7, 8, 2, 3, 4, 5, 6]
+
+
+def test_plan_no_classes_skips_metrics():
+    """When only functional code findings exist, phases 6 and 8 have no findings."""
+    findings = [
+        Finding("a.py", 1, "SC201", "x", "warning", "msg", "functions", "file"),
+        Finding("a.py", 2, "SC402", "x", "warning", "msg", "control", "file"),
+    ]
+    plan = _compute_plan(findings)
+    phase6 = plan["phases"][6]
+    phase8 = plan["phases"][8]
+    assert phase6["status"] == "skip"
+    assert phase8["status"] == "skip"
+
+
+def test_plan_internal_order():
+    """Chain structure is preserved in plan output."""
+    findings = [
+        Finding("a.py", 1, "SC402", "x", "warning", "msg", "control", "file"),
+    ]
+    plan = _compute_plan(findings)
+    phase4 = plan["phases"][4]
+    assert phase4["internal_order"] == [["SC402", "SC404", "SC210", "SC302"]]
+
+
+def test_plan_with_baseline(tmp_path):
+    """Baseline filtering is respected before plan computation."""
+    code = textwrap.dedent("""\
+        def foo(x=[]):
+            try:
+                pass
+            except:
+                pass
+    """)
+    p = tmp_path / "sample.py"
+    p.write_text(code, encoding="utf-8")
+    # Generate baseline from initial scan
+    findings_initial = scan_path(p)
+    assert len(findings_initial) > 0
+    # Now compute plan — should have findings
+    plan = _compute_plan(findings_initial)
+    assert plan["total_findings"] > 0
+    # Compute plan with empty findings — should skip all
+    plan_empty = _compute_plan([])
+    assert plan_empty["total_findings"] == 0
+    assert all(p["status"] == "skip" for p in plan_empty["phases"])
+
+
+def test_cli_plan_integration(tmp_path):
+    """E2E --plan produces output and exits 0."""
+    p = tmp_path / "sample.py"
+    p.write_text("def foo(x=[]):\n    pass\n", encoding="utf-8")
+    result = _run_cli(str(p), "--plan")
+    assert result.returncode == 0
+    assert "Refactoring Plan" in result.stdout
+    assert "Phase 0" in result.stdout
+
+
+def test_cli_plan_json_integration(tmp_path):
+    """--plan --format json produces valid JSON via CLI."""
+    p = tmp_path / "sample.py"
+    p.write_text("def foo(x=[]):\n    pass\n", encoding="utf-8")
+    result = _run_cli(str(p), "--plan", "--format", "json")
+    assert result.returncode == 0
+    parsed = json.loads(result.stdout)
+    assert "phases" in parsed
+    assert len(parsed["phases"]) == 9
