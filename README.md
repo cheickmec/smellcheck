@@ -324,7 +324,7 @@ Every rule is identified by an **SC code** (e.g. `SC701`). Use SC codes in `--se
 | SC304 | Dataclass candidate | info |
 | SC305 | Sequential tuple indexing | info |
 | SC306 | Lazy class (<2 methods) | info |
-| SC307 | Temporary fields | warning |
+| SC307 | Temporary fields | info |
 | SC401 | Dead code after return | warning |
 | SC402 | Deep nesting (>4 levels) | warning |
 | SC403 | Loop + append pattern | info |
