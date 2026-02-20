@@ -18,6 +18,7 @@ venv/
 .idea/
 .serena/
 .claude/
+.cursor/
 .omc/
 uv.lock
 logo-candidates/

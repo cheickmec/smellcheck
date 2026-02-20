@@ -1,0 +1,15 @@
+---
+description: When refactoring or improving Python code, use the python-refactoring skill to map smells to the 83-pattern catalog and apply before/after refactorings from the reference files.
+alwaysApply: false
+globs: ["**/*.py"]
+---
+
+# Python refactoring
+
+When the user asks to refactor, clean up, or improve Python code quality:
+
+1. Use the **python-refactoring** skill to identify smells and map them to pattern codes (SC1xx–SC8xx).
+2. Load the relevant reference file (state, functions, types, control, architecture, hygiene, idioms, metrics) for before/after guidance.
+3. Prefer the numbered refactoring patterns and note trade-offs.
+
+Run smellcheck (CLI or bundled script in the skill) when analyzing existing codebases.

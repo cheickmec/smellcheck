@@ -1,0 +1,12 @@
+{
+  "name": "python-refactoring",
+  "displayName": "Python Refactoring",
+  "version": "0.3.5",
+  "description": "Python refactoring catalog with 83 patterns. AST-based code smell detection + actionable refactoring guidance with before/after examples.",
+  "author": { "name": "Cheick Berthe" },
+  "license": "MIT",
+  "keywords": ["python", "refactoring", "code-smells", "ast", "static-analysis", "code-quality"],
+  "logo": "https://raw.githubusercontent.com/cheickmec/smellcheck/main/assets/logo.png",
+  "skills": "./skills/",
+  "rules": "./rules/"
+}

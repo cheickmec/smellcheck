@@ -36,7 +36,7 @@ smellcheck myfile.py --format json
 smellcheck src/ --min-severity warning --fail-on warning
 ```
 
-Also available as a **GitHub Action**, **pre-commit hook**, **SARIF/Code Scanning** integration, and **[Agent Skills](https://agentskills.io) plugin** for Claude Code, Cursor, Copilot, Gemini CLI, and more.
+Also available as a **GitHub Action**, **pre-commit hook**, **SARIF/Code Scanning** integration, **[Agent Skills](https://agentskills.io) plugin**, and **Cursor native plugin** for Claude Code, Cursor, Copilot, Gemini CLI, and more.
 
 **[Full installation guide →](https://github.com/cheickmec/smellcheck/blob/main/docs/installation.md)**
 
