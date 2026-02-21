@@ -144,8 +144,13 @@ smellcheck groups its 56 rules into 9 ordered phases with dependency chains. The
 ### Initialization
 
 ```bash
-smellcheck <path> --plan                  # text overview
-smellcheck <path> --plan --format json    # machine-readable
+# Bundled (no pip install required)
+python3 scripts/detect_smells.py <path> --plan
+python3 scripts/detect_smells.py <path> --plan --format json
+
+# Or via pip-installed CLI
+smellcheck <path> --plan
+smellcheck <path> --plan --format json
 ```
 
 The plan auto-selects a strategy: **local_first** (default, phases 0-8) or **architecture_first** (reorders to [0,1,7,8,2,3,4,5,6]) when >30% of findings are cross-file or metric scoped.
@@ -166,6 +171,8 @@ Each phase has three passes:
 **Pass 3 — Gate check**: If gate is `tests_pass`, run the test suite and do not proceed until green. If `rescan_after` is true, re-run `--plan` and re-bucket.
 
 ### Manual Pattern Assignments per Phase
+
+For each manual pattern below, load the corresponding reference file from the Reference Files section to see full before/after examples.
 
 | Phase | Patterns | Agent detection heuristics |
 |-------|----------|---------------------------|
