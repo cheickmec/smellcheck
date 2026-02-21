@@ -2401,26 +2401,27 @@ def test_plan_internal_order():
 
 
 def test_plan_with_baseline(tmp_path):
-    """Baseline filtering is respected before plan computation."""
-    code = textwrap.dedent("""\
-        def foo(x=[]):
-            try:
-                pass
-            except:
-                pass
-    """)
-    p = tmp_path / "sample.py"
-    p.write_text(code, encoding="utf-8")
-    # Generate baseline from initial scan
-    findings_initial = scan_path(p)
-    assert len(findings_initial) > 0
-    # Now compute plan — should have findings
-    plan = _compute_plan(findings_initial)
-    assert plan["total_findings"] > 0
-    # Compute plan with empty findings — should skip all
-    plan_empty = _compute_plan([])
-    assert plan_empty["total_findings"] == 0
-    assert all(p["status"] == "skip" for p in plan_empty["phases"])
+    """--plan respects --baseline: baselined findings are excluded from the plan."""
+    _write_py(tmp_path, "def foo(x=[]):\n    pass\n")
+    # Generate baseline capturing the mutable default finding
+    gen = _run_cli(str(tmp_path), "--generate-baseline", cwd=tmp_path)
+    assert gen.returncode == 0
+    bl = tmp_path / ".smellcheck-baseline.json"
+    bl.write_text(gen.stdout, encoding="utf-8")
+    # Plan without baseline — should have findings
+    plan_no_bl = _run_cli(str(tmp_path), "--plan", "--format", "json", cwd=tmp_path)
+    assert plan_no_bl.returncode == 0
+    data_no_bl = json.loads(plan_no_bl.stdout)
+    assert data_no_bl["total_findings"] > 0
+    # Plan with baseline — same code, all findings suppressed
+    plan_bl = _run_cli(
+        str(tmp_path), "--plan", "--format", "json",
+        "--baseline", str(bl), cwd=tmp_path,
+    )
+    assert plan_bl.returncode == 0
+    data_bl = json.loads(plan_bl.stdout)
+    assert data_bl["total_findings"] == 0
+    assert all(p["status"] == "skip" for p in data_bl["phases"])
 
 
 def test_cli_plan_integration(tmp_path):
