@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8](https://github.com/cheickmec/smellcheck/compare/v0.3.7...v0.3.8) (2026-02-21)
+
+
+### Features
+
+* add --plan for guided refactoring workflow ([c328574](https://github.com/cheickmec/smellcheck/commit/c32857498c02b408e97ebdddf6beaeda6a20cee5))
+
+
+### Bug Fixes
+
+* address code review findings for --plan feature ([1928c88](https://github.com/cheickmec/smellcheck/commit/1928c88eb00a8b8a64dff4095c04289d9a8fd523))
+
+
+### Documentation
+
+* improve SKILL.md workflow section discoverability ([6db838e](https://github.com/cheickmec/smellcheck/commit/6db838e997b03b68fd7b4dc7f29a082fad041baf))
+
 ## [0.3.7](https://github.com/cheickmec/smellcheck/compare/v0.3.6...v0.3.7) (2026-02-20)
 
 
