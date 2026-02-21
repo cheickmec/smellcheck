@@ -2443,3 +2443,40 @@ def test_cli_plan_json_integration(tmp_path):
     parsed = json.loads(result.stdout)
     assert "phases" in parsed
     assert len(parsed["phases"]) == 9
+
+
+def test_plan_feedback_label_local_first():
+    """Under local_first, phase 8 shows 'Feedback to' with loop count."""
+    findings = [
+        Finding("a.py", i, "SC201", "x", "warning", "msg", "functions", "file")
+        for i in range(4)
+    ] + [Finding("a.py", 5, "SC801", "x", "warning", "msg", "metrics", "metric")]
+    plan = _compute_plan(findings)
+    assert plan["strategy"] == "local_first"
+    text = _format_plan_text(plan)
+    assert "Feedback to Phase 6" in text
+    assert "max 2 loops" in text
+
+
+def test_plan_feedback_label_architecture_first():
+    """Under architecture_first, phase 8 shows 'Feeds into' (no loop)."""
+    findings = [
+        Finding("a.py", 1, "SC503", "x", "warning", "msg", "architecture", "cross_file"),
+        Finding("a.py", 2, "SC504", "x", "warning", "msg", "architecture", "cross_file"),
+        Finding("a.py", 3, "SC606", "x", "warning", "msg", "hygiene", "cross_file"),
+        Finding("a.py", 4, "SC801", "x", "warning", "msg", "metrics", "metric"),
+    ]
+    plan = _compute_plan(findings)
+    assert plan["strategy"] == "architecture_first"
+    text = _format_plan_text(plan)
+    assert "Feeds into Phase 6" in text
+    assert "max 2 loops" not in text
+
+
+def test_plan_and_generate_baseline_mutually_exclusive(tmp_path):
+    """--plan and --generate-baseline cannot be used together."""
+    p = tmp_path / "sample.py"
+    p.write_text("x = 1\n", encoding="utf-8")
+    result = _run_cli(str(p), "--plan", "--generate-baseline")
+    assert result.returncode == 1
+    assert "mutually exclusive" in result.stderr

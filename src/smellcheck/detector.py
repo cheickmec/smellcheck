@@ -496,7 +496,6 @@ _REFACTORING_PHASES: tuple[dict, ...] = (
         "internal_order": [["SC101", "SC104", "SC103"], ["SC106", "SC303"]],
         "gate": None,
         "rescan_after": False,
-
         "feedback_to": None,
         "max_loops": None,
     },
@@ -524,7 +523,6 @@ _REFACTORING_PHASES: tuple[dict, ...] = (
         "internal_order": [],
         "gate": None,
         "rescan_after": False,
-
         "feedback_to": 6,
         "max_loops": 2,
     },
@@ -550,7 +548,12 @@ _RULE_TO_PHASE: dict[str, int] = _build_rule_to_phase()
 def _group_findings_by_phase(
     findings: list["Finding"],
 ) -> dict[int, list["Finding"]]:
-    """Bucket findings by their refactoring phase index."""
+    """Bucket findings by their refactoring phase index.
+
+    Findings with unknown rule codes (not in ``_RULE_TO_PHASE``) are silently
+    skipped — they are still counted in ``total_findings`` by ``_compute_plan``
+    but do not appear in any phase.
+    """
     groups: dict[int, list["Finding"]] = {}
     for f in findings:
         phase_idx = _RULE_TO_PHASE.get(f.pattern)
@@ -627,8 +630,10 @@ def _compute_plan(findings: list["Finding"]) -> dict:
 def _format_plan_text(plan: dict) -> str:
     """Render a refactoring plan as human-readable text."""
     lines: list[str] = []
-    lines.append(f"Refactoring Plan  ({plan['total_findings']} findings, "
-                 f"{plan['total_rules_hit']} rules, strategy: {plan['strategy']})")
+    f_word = "finding" if plan["total_findings"] == 1 else "findings"
+    r_word = "rule" if plan["total_rules_hit"] == 1 else "rules"
+    lines.append(f"Refactoring Plan  ({plan['total_findings']} {f_word}, "
+                 f"{plan['total_rules_hit']} {r_word}, strategy: {plan['strategy']})")
     lines.append("=" * len(lines[0]))
     lines.append("")
 
@@ -4720,9 +4725,21 @@ def main():
         raw_args.remove("--generate-baseline")
     baseline_path_str = _pop_option(raw_args, "--baseline")
 
+    # Extract --plan before _parse_args
+    plan_mode = "--plan" in raw_args
+    if plan_mode:
+        raw_args.remove("--plan")
+
     if generate_baseline and baseline_path_str:
         print(
             "Error: --generate-baseline and --baseline are mutually exclusive",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if plan_mode and generate_baseline:
+        print(
+            "Error: --plan and --generate-baseline are mutually exclusive",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -4739,11 +4756,6 @@ def main():
             )
         else:
             diff_ref = "HEAD"
-
-    # Extract --plan before _parse_args
-    plan_mode = "--plan" in raw_args
-    if plan_mode:
-        raw_args.remove("--plan")
 
     if diff_ref is not None and generate_baseline:
         print(
