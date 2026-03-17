@@ -13,6 +13,7 @@
   <a href="https://pypi.org/project/smellcheck/"><img src="https://img.shields.io/pypi/v/smellcheck" alt="PyPI"></a>
   <a href="https://pypi.org/project/smellcheck/"><img src="https://img.shields.io/pypi/pyversions/smellcheck" alt="Python"></a>
   <a href="https://github.com/cheickmec/smellcheck/actions/workflows/ci.yml"><img src="https://github.com/cheickmec/smellcheck/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://codecov.io/gh/cheickmec/smellcheck"><img src="https://codecov.io/gh/cheickmec/smellcheck/branch/main/graph/badge.svg" alt="Coverage"></a>
   <a href="https://pypistats.org/packages/smellcheck"><img src="https://img.shields.io/pypi/dm/smellcheck" alt="Downloads"></a>
   <a href="https://github.com/cheickmec/smellcheck/blob/main/docs/installation.md#pre-commit"><img src="https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit" alt="pre-commit"></a>
   <a href="https://github.com/cheickmec/smellcheck/blob/main/LICENSE"><img src="https://img.shields.io/github/license/cheickmec/smellcheck" alt="License"></a>
