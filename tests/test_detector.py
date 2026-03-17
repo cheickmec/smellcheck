@@ -405,7 +405,7 @@ def test_cli_help():
 
 def test_rule_registry_complete():
     """Registry has 56 entries with valid families and scopes."""
-    assert len(_RULE_REGISTRY) == 56
+    assert len(_RULE_REGISTRY) == 57
     for key, rd in _RULE_REGISTRY.items():
         assert key.startswith("SC"), f"Key {key!r} must start with 'SC'"
         assert key == rd.rule_id, f"Key {key!r} must match rule_id {rd.rule_id!r}"
@@ -3333,3 +3333,86 @@ def test_env_var_whitespace_ignored(monkeypatch):
     monkeypatch.setenv("SMELLCHECK_FORMAT", "   ")
     cfg = _read_env_config()
     assert "format" not in cfg
+
+
+# ---------------------------------------------------------------------------
+# SC509 — Lazy Re-export Module detection
+# ---------------------------------------------------------------------------
+
+
+def test_sc509_lazy_reexport_detected(tmp_path):
+    """A module that only imports and re-exports should trigger SC509."""
+    p = _write_py(
+        tmp_path,
+        """\
+        from module_a import ClassA
+        from module_b import ClassB
+        from module_c import ClassC
+        from module_d import func_d
+        from module_e import func_e
+        from module_f import ClassF
+
+        __all__ = ["ClassA", "ClassB", "ClassC", "func_d", "func_e", "ClassF"]
+        """,
+    )
+    findings = scan_path(p)
+    sc509 = [f for f in findings if f.pattern == "SC509"]
+    assert len(sc509) == 1
+    assert "re-export" in sc509[0].message.lower() or "imports" in sc509[0].message.lower()
+
+
+def test_sc509_init_py_excluded(tmp_path):
+    """__init__.py files should NOT trigger SC509."""
+    init = tmp_path / "__init__.py"
+    init.write_text(
+        textwrap.dedent("""\
+        from module_a import ClassA
+        from module_b import ClassB
+        from module_c import ClassC
+        from module_d import func_d
+        from module_e import func_e
+        from module_f import ClassF
+
+        __all__ = ["ClassA", "ClassB", "ClassC", "func_d", "func_e", "ClassF"]
+        """),
+        encoding="utf-8",
+    )
+    findings = scan_path(init)
+    sc509 = [f for f in findings if f.pattern == "SC509"]
+    assert len(sc509) == 0
+
+
+def test_sc509_module_with_logic_not_flagged(tmp_path):
+    """A module with actual function defs should NOT trigger SC509."""
+    p = _write_py(
+        tmp_path,
+        """\
+        from module_a import ClassA
+        from module_b import ClassB
+        from module_c import ClassC
+        from module_d import func_d
+        from module_e import func_e
+        from module_f import ClassF
+
+        def process():
+            return ClassA()
+        """,
+    )
+    findings = scan_path(p)
+    sc509 = [f for f in findings if f.pattern == "SC509"]
+    assert len(sc509) == 0
+
+
+def test_sc509_small_module_excluded(tmp_path):
+    """Modules with fewer than 5 statements should NOT trigger SC509."""
+    p = _write_py(
+        tmp_path,
+        """\
+        from module_a import ClassA
+        from module_b import ClassB
+        from module_c import ClassC
+        """,
+    )
+    findings = scan_path(p)
+    sc509 = [f for f in findings if f.pattern == "SC509"]
+    assert len(sc509) == 0

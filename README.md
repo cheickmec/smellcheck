@@ -350,7 +350,7 @@ Every rule is identified by an **SC code** (e.g. `SC701`). Use SC codes in `--se
 | SC702 | open() without context manager | warning |
 | SC703 | Blocking calls in async functions | warning |
 
-### Cross-File (10 checks)
+### Cross-File (11 checks)
 
 | SC Code | Pattern | Description |
 |---------|---------|-------------|
@@ -363,6 +363,7 @@ Every rule is identified by an **SC code** (e.g. `SC701`). Use SC codes in `--se
 | SC506 | Inappropriate intimacy | >3 bidirectional class references between files |
 | SC507 | Speculative generality | Abstract class with no concrete subclasses |
 | SC508 | Unstable dependency | Stable module depends on unstable module |
+| SC509 | Lazy re-export module | Module only re-exports imported symbols with no logic |
 | SC606 | Duplicate functions | AST-normalized hashing across files |
 
 ### OO Metrics (5 checks)
@@ -399,7 +400,7 @@ Each pattern includes a description, before/after code examples, and trade-offs:
 | [`functions.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/functions.md) | Extraction, naming, parameters, CQS (SC201–SC210) |
 | [`types.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/types.md) | Classes, reification, polymorphism, nulls (SC301–SC309) |
 | [`control.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/control.md) | Guards, pipelines, conditionals, phases (SC401–SC407) |
-| [`architecture.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/architecture.md) | DI, singletons, exceptions, delegates (SC501–SC508) |
+| [`architecture.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/architecture.md) | DI, singletons, exceptions, delegates (SC501–SC509) |
 | [`hygiene.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/hygiene.md) | Constants, dead code, comments, style (SC601–SC606) |
 | [`idioms.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/idioms.md) | Context managers, generators, unpacking, async (SC701–SC703) |
 | [`metrics.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/metrics.md) | OO metrics: cohesion, coupling, fan-out, response, delegation (SC801–SC805) |
