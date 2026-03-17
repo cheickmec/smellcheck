@@ -2480,3 +2480,697 @@ def test_plan_and_generate_baseline_mutually_exclusive(tmp_path):
     result = _run_cli(str(p), "--plan", "--generate-baseline")
     assert result.returncode == 1
     assert "mutually exclusive" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Per-SC named tests (one per SC code, 56 total)
+# ---------------------------------------------------------------------------
+
+
+# --- SC1xx: State & Immutability ---
+
+
+def test_SC101_remove_setters(tmp_path):
+    p = _write_py(tmp_path, """\
+        class User:
+            def set_name(self, name):
+                self._name = name
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC101" for f in findings)
+
+
+def test_SC102_convert_variables_to_constants(tmp_path):
+    p = _write_py(tmp_path, """\
+        TAX_RATE = 0.08
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC102" for f in findings)
+
+
+def test_SC103_protect_public_attributes(tmp_path):
+    p = _write_py(tmp_path, """\
+        class Account:
+            def __init__(self):
+                self.balance = 0
+                self.name = "test"
+                self.email = "a@b.com"
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC103" for f in findings)
+
+
+def test_SC104_build_with_the_essence(tmp_path):
+    p = _write_py(tmp_path, """\
+        class User:
+            def __init__(self):
+                self.name = None
+                self.age = None
+                self.email = None
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC104" for f in findings)
+
+
+def test_SC105_convert_attributes_to_sets(tmp_path):
+    p = _write_py(tmp_path, """\
+        class Employee:
+            def __init__(self):
+                self.is_manager = False
+                self.is_admin = False
+                self.is_contractor = False
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC105" for f in findings)
+
+
+def test_SC106_replace_global_variables_with_di(tmp_path):
+    p = _write_py(tmp_path, """\
+        db = dict()
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC106" for f in findings)
+
+
+def test_SC107_replace_sequential_ids(tmp_path):
+    p = _write_py(tmp_path, """\
+        class Order:
+            next_id = 0
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC107" for f in findings)
+
+
+# --- SC2xx: Functions ---
+
+
+def test_SC201_extract_method(tmp_path):
+    lines = ["def big():"] + [f"    x{i} = {i}" for i in range(30)]
+    p = _write_py(tmp_path, "\n".join(lines) + "\n")
+    findings = scan_path(p)
+    assert any(f.pattern == "SC201" for f in findings)
+
+
+def test_SC202_rename_result_variables(tmp_path):
+    p = _write_py(tmp_path, """\
+        def fetch():
+            result = compute()
+            return result
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC202" for f in findings)
+
+
+def test_SC203_replace_input_calls(tmp_path):
+    p = _write_py(tmp_path, """\
+        def greet():
+            name = input("Name: ")
+            print(f"Hi {name}")
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC203" for f in findings)
+
+
+def test_SC204_replace_null_with_collection(tmp_path):
+    p = _write_py(tmp_path, """\
+        def find(name):
+            if name:
+                return [name]
+            return None
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC204" for f in findings)
+
+
+def test_SC205_strip_annotations(tmp_path):
+    p = _write_py(tmp_path, """\
+        @a
+        @b
+        @c
+        @d
+        def decorated():
+            pass
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC205" for f in findings)
+
+
+def test_SC206_reify_parameters(tmp_path):
+    p = _write_py(tmp_path, """\
+        def process(a, b, c, d, e, f):
+            return a + b + c + d + e + f
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC206" for f in findings)
+
+
+def test_SC207_separate_query_from_modifier(tmp_path):
+    p = _write_py(tmp_path, """\
+        class Cart:
+            def add_and_total(self, item):
+                self.items = item
+                return 42
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC207" for f in findings)
+
+
+def test_SC208_remove_unused_parameters(tmp_path):
+    p = _write_py(tmp_path, """\
+        def process(a, b, c):
+            return a + b
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC208" for f in findings)
+
+
+def test_SC209_replace_long_lambda(tmp_path):
+    p = _write_py(tmp_path, """\
+        fn = lambda x, y, z: (x + y + z) * 2 if (x > 0 and y > 0 and z > 0) else (x - y - z) * 3 if x < 0 else 0
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC209" for f in findings)
+
+
+def test_SC210_reduce_cyclomatic_complexity(tmp_path):
+    branches = "\n".join(
+        [f"    {'el' if i else ''}if x == {i}: return {i}" for i in range(12)]
+    )
+    p = _write_py(tmp_path, f"def complex_func(x):\n{branches}\n")
+    findings = scan_path(p)
+    assert any(f.pattern == "SC210" for f in findings)
+
+
+def test_SC211_move_method_feature_envy(tmp_path):
+    mod_a = tmp_path / "mod_a.py"
+    mod_a.write_text(textwrap.dedent("""\
+        class Helper:
+            x = 1
+            y = 2
+            z = 3
+    """), encoding="utf-8")
+    mod_b = tmp_path / "mod_b.py"
+    mod_b.write_text(textwrap.dedent("""\
+        from mod_a import Helper
+        class Worker:
+            def do_work(self):
+                h = Helper()
+                a = Helper.x
+                b = Helper.y
+                c = Helper.z
+                return a + b + c
+    """), encoding="utf-8")
+    findings = scan_paths([mod_a, mod_b])
+    assert any(f.pattern == "SC211" for f in findings)
+
+
+# --- SC3xx: Types & Classes ---
+
+
+def test_SC301_extract_class(tmp_path):
+    methods = "\n".join(
+        [f"    def m{i}(self): pass" for i in range(15)]
+    )
+    p = _write_py(tmp_path, f"class Blob:\n{methods}\n")
+    findings = scan_path(p)
+    assert any(f.pattern == "SC301" for f in findings)
+
+
+def test_SC302_replace_if_with_polymorphism(tmp_path):
+    p = _write_py(tmp_path, """\
+        def handle(shape):
+            if isinstance(shape, Circle):
+                return 1
+            elif isinstance(shape, Square):
+                return 2
+            elif isinstance(shape, Triangle):
+                return 3
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC302" for f in findings)
+
+
+def test_SC303_replace_singleton(tmp_path):
+    p = _write_py(tmp_path, """\
+        class DB:
+            _instance = None
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC303" for f in findings)
+
+
+def test_SC304_replace_class_with_dataclass(tmp_path):
+    p = _write_py(tmp_path, """\
+        class Point:
+            def __init__(self, x, y):
+                self.x = x
+                self.y = y
+            def __repr__(self):
+                return f"Point({self.x}, {self.y})"
+            def __eq__(self, other):
+                return self.x == other.x and self.y == other.y
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC304" for f in findings)
+
+
+def test_SC305_use_unpacking_instead_of_indexing(tmp_path):
+    p = _write_py(tmp_path, """\
+        def unpack(data):
+            a = data[0]
+            b = data[1]
+            c = data[2]
+            return a + b + c
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC305" for f in findings)
+
+
+def test_SC306_remove_lazy_class(tmp_path):
+    p = _write_py(tmp_path, """\
+        class Wrapper:
+            def go(self):
+                pass
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC306" for f in findings)
+
+
+def test_SC307_remove_temporary_field(tmp_path):
+    p = _write_py(tmp_path, """\
+        class Builder:
+            def __init__(self):
+                self.x = 1
+                self.y = 2
+                self.z = 3
+                self.w = 4
+            def a(self):
+                return self.x
+            def b(self):
+                return self.y
+            def c(self):
+                return self.z
+            def d(self):
+                return self.w
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC307" for f in findings)
+
+
+def test_SC308_deep_inheritance_tree(tmp_path):
+    mod = tmp_path / "deep.py"
+    mod.write_text(textwrap.dedent("""\
+        class A: pass
+        class B(A): pass
+        class C(B): pass
+        class D(C): pass
+        class E(D): pass
+        class F(E): pass
+    """), encoding="utf-8")
+    dummy = tmp_path / "dummy.py"
+    dummy.write_text("x = 1\n", encoding="utf-8")
+    findings = scan_paths([mod, dummy])
+    assert any(f.pattern == "SC308" for f in findings)
+
+
+def test_SC309_wide_hierarchy(tmp_path):
+    children = "\n".join([f"class Child{i}(Base): pass" for i in range(7)])
+    mod = tmp_path / "wide.py"
+    mod.write_text(f"class Base: pass\n{children}\n", encoding="utf-8")
+    dummy = tmp_path / "dummy.py"
+    dummy.write_text("x = 1\n", encoding="utf-8")
+    findings = scan_paths([mod, dummy])
+    assert any(f.pattern == "SC309" for f in findings)
+
+
+# --- SC4xx: Control ---
+
+
+def test_SC401_remove_dead_code(tmp_path):
+    p = _write_py(tmp_path, """\
+        def f():
+            return 1
+            x = 2
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC401" for f in findings)
+
+
+def test_SC402_replace_nested_conditional_with_guard(tmp_path):
+    p = _write_py(tmp_path, """\
+        def deep(x):
+            if x:
+                if x > 1:
+                    if x > 2:
+                        if x > 3:
+                            return x
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC402" for f in findings)
+
+
+def test_SC403_replace_loop_with_pipeline(tmp_path):
+    p = _write_py(tmp_path, """\
+        def collect(items):
+            result = []
+            for item in items:
+                result.append(item)
+            return result
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC403" for f in findings)
+
+
+def test_SC404_decompose_conditional(tmp_path):
+    p = _write_py(tmp_path, """\
+        def check(a, b, c, d):
+            if a and b and c and d:
+                return True
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC404" for f in findings)
+
+
+def test_SC405_replace_control_flag_with_break(tmp_path):
+    p = _write_py(tmp_path, """\
+        def search(items):
+            found = False
+            for item in items:
+                if found:
+                    print("done")
+                if item == "target":
+                    found = True
+            return found
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC405" for f in findings)
+
+
+def test_SC406_simplify_complex_comprehension(tmp_path):
+    p = _write_py(tmp_path, """\
+        result = [x + y + z for x in range(10) for y in range(10) for z in range(10)]
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC406" for f in findings)
+
+
+def test_SC407_add_default_else_branch(tmp_path):
+    p = _write_py(tmp_path, """\
+        def classify(x):
+            if x > 0:
+                return "positive"
+            elif x < 0:
+                return "negative"
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC407" for f in findings)
+
+
+# --- SC5xx: Architecture ---
+
+
+def test_SC501_replace_error_codes_with_exceptions(tmp_path):
+    p = _write_py(tmp_path, """\
+        def process(x):
+            if x < 0:
+                return -1
+            if x == 0:
+                return 0
+            return 1
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC501" for f in findings)
+
+
+def test_SC502_law_of_demeter(tmp_path):
+    p = _write_py(tmp_path, """\
+        def get_city(order):
+            return order.customer.address.city
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC502" for f in findings)
+
+
+def test_SC503_break_cyclic_import(tmp_path):
+    mod_a = tmp_path / "mod_a.py"
+    mod_a.write_text("import mod_b\n", encoding="utf-8")
+    mod_b = tmp_path / "mod_b.py"
+    mod_b.write_text("import mod_a\n", encoding="utf-8")
+    findings = scan_paths([mod_a, mod_b])
+    assert any(f.pattern == "SC503" for f in findings)
+
+
+def test_SC504_split_god_module(tmp_path):
+    defs = "\n".join([f"def func_{i}(): pass" for i in range(35)])
+    mod = tmp_path / "god.py"
+    mod.write_text(defs + "\n", encoding="utf-8")
+    dummy = tmp_path / "dummy.py"
+    dummy.write_text("x = 1\n", encoding="utf-8")
+    findings = scan_paths([mod, dummy])
+    assert any(f.pattern == "SC504" for f in findings)
+
+
+def test_SC505_shotgun_surgery(tmp_path):
+    target = tmp_path / "target.py"
+    target.write_text("def shared_func(): pass\n", encoding="utf-8")
+    callers = []
+    for i in range(7):
+        caller = tmp_path / f"caller_{i}.py"
+        caller.write_text(
+            f"from target import shared_func\ndef use_{i}(): shared_func()\n",
+            encoding="utf-8",
+        )
+        callers.append(caller)
+    findings = scan_paths([target] + callers)
+    assert any(f.pattern == "SC505" for f in findings)
+
+
+def test_SC506_inappropriate_intimacy(tmp_path):
+    mod_a = tmp_path / "intim_a.py"
+    mod_a.write_text(textwrap.dedent("""\
+        class A:
+            def m1(self):
+                return B.x + B.y + B.z + B.w
+            def m2(self):
+                return B.a
+        class B:
+            x = 1; y = 2; z = 3; w = 4; a = 5
+            def m1(self):
+                return A.x + A.y + A.z + A.w
+    """), encoding="utf-8")
+    dummy = tmp_path / "intim_b.py"
+    dummy.write_text("x = 1\n", encoding="utf-8")
+    findings = scan_paths([mod_a, dummy])
+    assert any(f.pattern == "SC506" for f in findings)
+
+
+def test_SC507_remove_speculative_generality(tmp_path):
+    mod = tmp_path / "speculative.py"
+    mod.write_text(textwrap.dedent("""\
+        from abc import ABC, abstractmethod
+        class AbstractHandler(ABC):
+            @abstractmethod
+            def handle(self): pass
+    """), encoding="utf-8")
+    dummy = tmp_path / "spec_dummy.py"
+    dummy.write_text("x = 1\n", encoding="utf-8")
+    findings = scan_paths([mod, dummy])
+    assert any(f.pattern == "SC507" for f in findings)
+
+
+def test_SC508_unstable_dependency(tmp_path):
+    # stable_mod has many incoming deps (callers import it) -> low instability
+    stable_mod = tmp_path / "stable_mod.py"
+    stable_mod.write_text("import volatile\ndef helper(): pass\n", encoding="utf-8")
+    # volatile has many outgoing deps, no incoming -> high instability
+    many_imports = "\n".join([f"import dep_{i}" for i in range(6)])
+    volatile = tmp_path / "volatile.py"
+    volatile.write_text(many_imports + "\ndef go(): pass\n", encoding="utf-8")
+    dep_files = []
+    for i in range(6):
+        d = tmp_path / f"dep_{i}.py"
+        d.write_text("x = 1\n", encoding="utf-8")
+        dep_files.append(d)
+    # callers all import stable_mod -> stable_mod gets many incoming
+    callers = []
+    for i in range(6):
+        c = tmp_path / f"caller_{i}.py"
+        c.write_text("import stable_mod\n", encoding="utf-8")
+        callers.append(c)
+    findings = scan_paths([stable_mod, volatile] + dep_files + callers, use_cache=False)
+    assert any(f.pattern == "SC508" for f in findings)
+
+
+# --- SC6xx: Hygiene ---
+
+
+def test_SC601_extract_constant(tmp_path):
+    p = _write_py(tmp_path, """\
+        def discount(price):
+            return price * 0.15
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC601" for f in findings)
+
+
+def test_SC602_remove_unhandled_exceptions(tmp_path):
+    p = _write_py(tmp_path, """\
+        try:
+            risky()
+        except:
+            pass
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC602" for f in findings)
+
+
+def test_SC603_replace_string_concatenation(tmp_path):
+    p = _write_py(tmp_path, """\
+        name = "world"
+        msg = "hello " + name + " how " + "are you"
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC603" for f in findings)
+
+
+def test_SC604_replace_with_contextlib(tmp_path):
+    p = _write_py(tmp_path, """\
+        class Lock:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC604" for f in findings)
+
+
+def test_SC605_remove_empty_catch_block(tmp_path):
+    p = _write_py(tmp_path, """\
+        try:
+            risky()
+        except ValueError:
+            pass
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC605" for f in findings)
+
+
+def test_SC606_remove_duplicated_code(tmp_path):
+    func_body = "\n".join([f"    x{i} = {i}" for i in range(10)])
+    mod_a = tmp_path / "dup_a.py"
+    mod_a.write_text(f"def compute_a():\n{func_body}\n    return x0\n", encoding="utf-8")
+    mod_b = tmp_path / "dup_b.py"
+    mod_b.write_text(f"def compute_b():\n{func_body}\n    return x0\n", encoding="utf-8")
+    findings = scan_paths([mod_a, mod_b])
+    assert any(f.pattern == "SC606" for f in findings)
+
+
+# --- SC7xx: Idioms ---
+
+
+def test_SC701_replace_mutable_default_arguments(tmp_path):
+    p = _write_py(tmp_path, """\
+        def foo(x=[]):
+            return x
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC701" for f in findings)
+
+
+def test_SC702_use_context_managers(tmp_path):
+    p = _write_py(tmp_path, """\
+        def read_file():
+            f = open("test.txt")
+            data = f.read()
+            f.close()
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC702" for f in findings)
+
+
+def test_SC703_avoid_blocking_calls_in_async(tmp_path):
+    p = _write_py(tmp_path, """\
+        import asyncio
+        async def fetch():
+            data = open("file.txt").read()
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC703" for f in findings)
+
+
+# --- SC8xx: Metrics ---
+
+
+def test_SC801_low_class_cohesion(tmp_path):
+    # LCOM > 0.8: 6 methods each using a single unique field (no sharing).
+    # field_count comes from __init__ assignments; method_count >= 3 required.
+    # LCOM = 1 - (6*1)/(6*6) = 1 - 1/6 = 0.833 > 0.8 threshold.
+    p = _write_py(tmp_path, """\
+        class Blob:
+            def __init__(self):
+                self.x = 1
+                self.y = 2
+                self.z = 3
+                self.w = 4
+                self.v = 5
+                self.u = 6
+            def a(self): return self.x
+            def b(self): return self.y
+            def c(self): return self.z
+            def d(self): return self.w
+            def e(self): return self.v
+            def f(self): return self.u
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC801" for f in findings)
+
+
+def test_SC802_high_coupling_between_objects(tmp_path):
+    # CBO counts UppercaseName.attr accesses in class methods (> 8 threshold).
+    classes = "\n".join([f"class Dep{i}:\n    val = {i}" for i in range(9)])
+    accesses = "\n".join([f"        x{i} = Dep{i}.val" for i in range(9)])
+    code = f"{classes}\nclass Heavy:\n    def work(self):\n{accesses}\n"
+    mod = tmp_path / "heavy.py"
+    mod.write_text(code, encoding="utf-8")
+    findings = scan_path(mod)
+    assert any(f.pattern == "SC802" for f in findings)
+
+
+def test_SC803_excessive_fan_out(tmp_path):
+    # SC803 counts outgoing imports to other *scanned* modules (> 15 threshold).
+    # Create hub.py importing 16 sibling modules, then scan all together.
+    for i in range(16):
+        (tmp_path / f"fmod{i}.py").write_text(f"x = {i}\n", encoding="utf-8")
+    hub = tmp_path / "hub.py"
+    hub.write_text(
+        "\n".join([f"import fmod{i}" for i in range(16)]) + "\n",
+        encoding="utf-8",
+    )
+    all_files = [hub] + [tmp_path / f"fmod{i}.py" for i in range(16)]
+    findings = scan_paths(all_files, use_cache=False)
+    assert any(f.pattern == "SC803" for f in findings)
+
+
+def test_SC804_high_response_for_class(tmp_path):
+    methods = "\n".join([f"    def m{i}(self): pass" for i in range(22)])
+    p = _write_py(tmp_path, f"class BigClass:\n{methods}\n")
+    findings = scan_path(p)
+    assert any(f.pattern == "SC804" for f in findings)
+
+
+def test_SC805_remove_middle_man(tmp_path):
+    p = _write_py(tmp_path, """\
+        class Proxy:
+            def __init__(self):
+                self.real = Real()
+            def a(self): return self.real.a()
+            def b(self): return self.real.b()
+            def c(self): return self.real.c()
+        class Real:
+            def a(self): return 1
+            def b(self): return 2
+            def c(self): return 3
+    """)
+    findings = scan_path(p)
+    assert any(f.pattern == "SC805" for f in findings)
