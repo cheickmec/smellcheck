@@ -372,6 +372,8 @@ Every rule is identified by an **SC code** (e.g. `SC701`). Use SC codes in `--se
 | SC804 | Response for a Class | >20 |
 | SC805 | Middle Man (delegation ratio) | >50% |
 
+See the [OO Metrics Interpretation Guide](https://github.com/cheickmec/smellcheck/blob/main/docs/oo-metrics-guide.md) for detailed explanations, real-world examples, and when-to-ignore guidance.
+
 ## Analysis Tiers
 
 smellcheck runs three analysis passes, each building on the previous one:
