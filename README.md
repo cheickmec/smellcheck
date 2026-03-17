@@ -381,11 +381,11 @@ See the [OO Metrics Interpretation Guide](https://github.com/cheickmec/smellchec
 
 smellcheck runs three analysis passes, each building on the previous one:
 
-1. **Per-file AST checks** — Each `.py` file is parsed independently. An AST visitor walks the tree and runs ~35 `_check_*` methods that detect local smells (SC1xx–SC4xx, SC6xx–SC7xx). This is fast and needs no cross-file context.
+1. **Per-file AST checks** — Each `.py` file is parsed independently. An AST visitor walks the tree and runs ~35 `_check_*` methods that detect local smells. This is fast and needs no cross-file context.
 
-2. **Cross-file analysis** — After all files are visited, smellcheck builds an import graph and analyzes relationships between modules. This detects architecture smells like cyclic imports, god modules, shotgun surgery, duplicate logic, and excessive coupling (SC5xx).
+2. **Cross-file analysis** — After all files are visited, smellcheck builds an import graph and analyzes relationships between modules. This detects architecture smells like cyclic imports, god modules, shotgun surgery, duplicate logic, and excessive coupling.
 
-3. **OO metrics** — Class-level metrics (LCOM, CBO, fan-out, RFC, middle-man ratio) are computed from aggregated AST data collected during the per-file pass (SC8xx). These highlight structural problems that only emerge when looking at a class as a whole.
+3. **OO metrics** — Class-level and module-level metrics (LCOM, CBO, fan-out, RFC, middle-man ratio) are computed from aggregated AST data collected during the per-file pass. These highlight structural problems that only emerge when looking at a class or module as a whole.
 
 > **`--diff` tradeoff:** When using `--diff`, only changed files are analyzed. Per-file checks are accurate for those files, but cross-file and OO metric checks may miss issues introduced in unchanged files that depend on the changed ones. For full accuracy, run a periodic full scan without `--diff`.
 
