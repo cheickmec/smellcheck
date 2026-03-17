@@ -44,10 +44,18 @@ extends = "base.toml"
 
 Use `extends` to inherit from a shared config file:
 
+Single base:
+
 ```toml
 [tool.smellcheck]
-extends = "base.toml"           # single base
-extends = ["base.toml", "strict.toml"]  # multiple (later wins)
+extends = "base.toml"
+```
+
+Multiple bases (later file wins on conflict):
+
+```toml
+[tool.smellcheck]
+extends = ["base.toml", "strict.toml"]
 ```
 
 Paths are relative to the file containing the `extends` key. Maximum chain depth is 5.
