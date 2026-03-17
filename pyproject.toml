@@ -39,5 +39,8 @@ packages = ["src/smellcheck"]
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
 
+[project.optional-dependencies]
+test = ["pytest", "pytest-cov"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

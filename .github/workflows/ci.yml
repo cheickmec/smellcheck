@@ -18,9 +18,20 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package and test deps
-        run: pip install -e . && pip install pytest
+        run: pip install -e ".[test]"
       - name: Run tests
         run: pytest tests/ -v
+      - name: Run tests with coverage
+        if: matrix.python-version == '3.12'
+        run: pytest tests/ -v --cov=smellcheck --cov-report=xml --cov-report=term --cov-fail-under=85
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       - name: Self-check
         run: smellcheck src/smellcheck/ --min-severity warning
 
