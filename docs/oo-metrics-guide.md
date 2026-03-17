@@ -1,6 +1,6 @@
 # OO Metrics Interpretation Guide
 
-smellcheck computes five object-oriented metrics for every class with two or more methods. Each metric highlights a different structural risk. This guide explains what they measure, when they fire, and when it is safe to ignore them.
+smellcheck computes five object-oriented metrics for every class that meets minimum size thresholds (SC801 requires at least 3 methods and 2 fields; SC805 requires at least 3 non-dunder methods). Each metric highlights a different structural risk. This guide explains what they measure, when they fire, and when it is safe to ignore them.
 
 ## SC801 — Lack of Cohesion of Methods (LCOM)
 
@@ -33,7 +33,7 @@ class Mailer:
 
 ## SC802 — Coupling Between Objects (CBO)
 
-**What it measures:** How many other classes a given class depends on — through attribute access, method calls, inheritance, or type annotations. High CBO means a change in any of those dependencies may force changes here too.
+**What it measures:** How many distinct external classes a given class references by name — counted by detecting attribute accesses on uppercase-named variables within method bodies (e.g. `Foo.bar`, `Bar().method()`). High CBO means a change in any of those dependencies may force changes here too.
 
 **Threshold:** > 8 (severity: warning)
 
@@ -62,23 +62,26 @@ class Order:
 
 ## SC803 — Excessive Fan-Out
 
-**What it measures:** How many distinct external classes a single class calls or references. Similar to CBO but focuses on outgoing dependencies at the module level rather than type-level coupling.
+**What it measures:** How many other modules within the same project a single module imports. This is a module-level metric based on outgoing import dependencies — not class-level coupling. A module with high fan-out is tightly coupled to the rest of the codebase and hard to extract or reuse.
 
-**Threshold:** > 15 (severity: info)
+**Threshold:** > 15 outgoing module imports (severity: info)
 
 **Before:**
 ```python
-class Report:
-    def build(self):
-        DB().query()
-        Cache().get()
-        Fmt().render()
-        Mail().send()
-        Log().write()
+# report.py
+from .db import DB
+from .cache import Cache
+from .formatter import Fmt
+from .mailer import Mail
+from .logger import Log
+# ... 10+ more imports
 ```
 
 **After:**
 ```python
+# report.py
+from .report_facade import ReportFacade  # single dependency
+
 class Report:
     def __init__(self, facade: ReportFacade):
         self.facade = facade
@@ -87,7 +90,7 @@ class Report:
         self.facade.generate()
 ```
 
-**When to ignore:** Top-level composition roots or application entry points that wire dependencies together. Test setup code that necessarily touches many modules.
+**When to ignore:** Top-level composition roots or application entry points that wire dependencies together. Test setup modules that necessarily import many modules.
 
 ## SC804 — Response for a Class (RFC)
 

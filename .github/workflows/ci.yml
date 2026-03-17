@@ -20,6 +20,7 @@ jobs:
       - name: Install package and test deps
         run: pip install -e ".[test]"
       - name: Run tests
+        if: matrix.python-version != '3.12'
         run: pytest tests/ -v
       - name: Run tests with coverage
         if: matrix.python-version == '3.12'
@@ -46,6 +47,8 @@ jobs:
         run: pip install -e ".[type]"
       - name: Run mypy
         run: mypy src/smellcheck/
+        # continue-on-error is intentional: mypy is advisory during initial adoption.
+        # Once existing type errors are resolved this should be set to false.
         continue-on-error: true
 
   code-scanning:
