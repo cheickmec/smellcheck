@@ -401,12 +401,12 @@ _RULE_EXAMPLES: dict[str, tuple[str, str] | None] = {
         "class Parser:\n    def parse(self): self.data = read()\n\nclass Mailer:\n    def send_email(self): smtp.send(self.to)",
     ),
     "SC802": (
-        "class Order:\n    def process(self):\n        Inventory().check()\n        Payment().charge()\n        Shipping().ship()\n        Email().send()\n        Logger().log()",
+        "class Order:\n    def process(self):\n        Inventory.check(self.items)\n        Payment.charge(self.total)\n        Shipping.ship(self.address)\n        Email.send(self.user)\n        Logger.log(self.id)",
         "class Order:\n    def __init__(self, fulfillment):\n        self.fulfillment = fulfillment\n    def process(self):\n        self.fulfillment.run()",
     ),
     "SC803": (
-        "class Report:\n    def build(self):\n        DB().query()\n        Cache().get()\n        Fmt().render()\n        Mail().send()\n        Log().write()",
-        "class Report:\n    def __init__(self, facade):\n        self.facade = facade\n    def build(self):\n        self.facade.generate()",
+        "# report.py\nfrom .db import DB\nfrom .cache import Cache\nfrom .formatter import Fmt\nfrom .mailer import Mail\nfrom .logger import Log\n# ... 10+ more imports",
+        "# report.py\nfrom .report_facade import ReportFacade  # single dependency",
     ),
     "SC804": (
         "class Service:\n    def create(self): ...\n    def read(self): ...\n    def update(self): ...\n    def delete(self): ...\n    def validate(self): ...\n    def notify(self): ...",
