@@ -396,11 +396,26 @@ _RULE_EXAMPLES: dict[str, tuple[str, str] | None] = {
         "async def handler(request):\n    await asyncio.sleep(5)\n    data = await aiohttp.get(url)",
     ),
     # --- Metrics ---
-    "SC801": None,  # metric — low class cohesion (LCOM)
-    "SC802": None,  # metric — high coupling (CBO)
-    "SC803": None,  # metric — excessive fan-out
-    "SC804": None,  # metric — high response for class (RFC)
-    "SC805": None,  # metric — middle man
+    "SC801": (
+        "class Blob:\n    def parse(self): self.data = read()\n    def send_email(self): smtp.send(self.to)",
+        "class Parser:\n    def parse(self): self.data = read()\n\nclass Mailer:\n    def send_email(self): smtp.send(self.to)",
+    ),
+    "SC802": (
+        "class Order:\n    def process(self):\n        Inventory().check()\n        Payment().charge()\n        Shipping().ship()\n        Email().send()\n        Logger().log()",
+        "class Order:\n    def __init__(self, fulfillment):\n        self.fulfillment = fulfillment\n    def process(self):\n        self.fulfillment.run()",
+    ),
+    "SC803": (
+        "class Report:\n    def build(self):\n        DB().query()\n        Cache().get()\n        Fmt().render()\n        Mail().send()\n        Log().write()",
+        "class Report:\n    def __init__(self, facade):\n        self.facade = facade\n    def build(self):\n        self.facade.generate()",
+    ),
+    "SC804": (
+        "class Service:\n    def create(self): ...\n    def read(self): ...\n    def update(self): ...\n    def delete(self): ...\n    def validate(self): ...\n    def notify(self): ...",
+        "class Service:\n    def create(self): ...\n    def read(self): ...\n\nclass Validator:\n    def validate(self): ...\n\nclass Notifier:\n    def notify(self): ...",
+    ),
+    "SC805": (
+        "class Proxy:\n    def __init__(self, real):\n        self.real = real\n    def do(self): return self.real.do()\n    def run(self): return self.real.run()",
+        "# Remove the middleman — call real object directly\nobj = Real()\nobj.do()\nobj.run()",
+    ),
 }
 # fmt: on
 
