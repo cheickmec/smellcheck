@@ -17,6 +17,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -4519,10 +4520,18 @@ _HELP_TEXT: Final = textwrap.dedent("""\
 
     Configuration:
       smellcheck reads [tool.smellcheck] from the nearest pyproject.toml.
-      CLI flags override config values.
+      Precedence: CLI flags > environment variables > pyproject.toml > defaults.
       Use extends = "base.toml" to inherit from a shared config file.
       Multiple bases: extends = ["base.toml", "strict.toml"] (later wins).
       Paths are relative to the file containing the extends key.
+
+    Environment variables:
+      SMELLCHECK_MIN_SEVERITY   Equivalent to --min-severity
+      SMELLCHECK_FAIL_ON        Equivalent to --fail-on
+      SMELLCHECK_FORMAT         Equivalent to --format
+      SMELLCHECK_SELECT         Equivalent to --select (comma-separated)
+      SMELLCHECK_IGNORE         Equivalent to --ignore (comma-separated)
+      SMELLCHECK_BASELINE       Equivalent to --baseline
 
     Baseline workflow:
       smellcheck src/ --generate-baseline > .smellcheck-baseline.json
@@ -4625,10 +4634,20 @@ def _pop_option(args: list[str], flag: str) -> str | None:
 
 def _parse_args(
     argv: list[str],
-) -> tuple[list[Path], str, str, str, list[str] | None, list[str] | None, str | None]:
+) -> tuple[
+    list[Path],
+    str | None,
+    str | None,
+    str | None,
+    list[str] | None,
+    list[str] | None,
+    str | None,
+]:
     """Parse CLI arguments.
 
     Returns ``(paths, output_format, min_severity, fail_on, select, ignore, scope_filter)``.
+    Values are ``None`` when the corresponding flag was not explicitly provided,
+    allowing callers to layer defaults from other sources (env vars, config).
     """
     args = list(argv)
 
@@ -4643,13 +4662,13 @@ def _parse_args(
         sys.exit(0)
 
     # --format
-    output_format = _pop_option(args, "--format") or "text"
+    output_format = _pop_option(args, "--format")
     # --json (deprecated alias)
     if "--json" in args:
         args.remove("--json")
         output_format = "json"
 
-    if output_format not in {"text", "json", "github", "sarif", "junit", "gitlab"}:
+    if output_format is not None and output_format not in {"text", "json", "github", "sarif", "junit", "gitlab"}:
         print(
             f"Error: invalid format '{output_format}' -- must be one of: text, json, github, sarif, junit, gitlab",
             file=sys.stderr,
@@ -4657,8 +4676,8 @@ def _parse_args(
         sys.exit(1)
 
     # --fail-on
-    fail_on = _pop_option(args, "--fail-on") or "error"
-    if fail_on not in SEVERITY_ORDER:
+    fail_on = _pop_option(args, "--fail-on")
+    if fail_on is not None and fail_on not in SEVERITY_ORDER:
         print(
             f"Error: invalid --fail-on '{fail_on}' -- must be one of: info, warning, error",
             file=sys.stderr,
@@ -4666,8 +4685,8 @@ def _parse_args(
         sys.exit(1)
 
     # --min-severity
-    min_severity = _pop_option(args, "--min-severity") or "info"
-    if min_severity not in SEVERITY_ORDER:
+    min_severity = _pop_option(args, "--min-severity")
+    if min_severity is not None and min_severity not in SEVERITY_ORDER:
         print(
             f"Error: invalid --min-severity '{min_severity}' -- must be one of: info, warning, error",
             file=sys.stderr,
@@ -4703,6 +4722,69 @@ def _parse_args(
         paths.append(p)
 
     return paths, output_format, min_severity, fail_on, select, ignore, scope_filter
+
+
+# ---------------------------------------------------------------------------
+# Environment variable configuration
+# ---------------------------------------------------------------------------
+
+_ENV_VAR_MAP: Final = {
+    "SMELLCHECK_MIN_SEVERITY": "min-severity",
+    "SMELLCHECK_FAIL_ON": "fail-on",
+    "SMELLCHECK_FORMAT": "format",
+    "SMELLCHECK_SELECT": "select",
+    "SMELLCHECK_IGNORE": "ignore",
+    "SMELLCHECK_BASELINE": "baseline",
+}
+
+
+def _read_env_config() -> dict:
+    """Read ``SMELLCHECK_*`` environment variables and return a config dict.
+
+    List-valued variables (``SMELLCHECK_SELECT``, ``SMELLCHECK_IGNORE``) are
+    split on commas.  Invalid values for severity/format are reported to
+    stderr and cause :func:`sys.exit`.
+    """
+    env_config: dict = {}
+    for env_var, config_key in _ENV_VAR_MAP.items():
+        value = os.environ.get(env_var)
+        if value is None:
+            continue
+        value = value.strip()
+        if not value:
+            continue
+
+        if config_key in ("select", "ignore"):
+            env_config[config_key] = [c.strip() for c in value.split(",") if c.strip()]
+        elif config_key == "min-severity":
+            if value not in SEVERITY_ORDER:
+                print(
+                    f"Error: invalid {env_var}='{value}' -- must be one of: info, warning, error",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            env_config[config_key] = value
+        elif config_key == "fail-on":
+            if value not in SEVERITY_ORDER:
+                print(
+                    f"Error: invalid {env_var}='{value}' -- must be one of: info, warning, error",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            env_config[config_key] = value
+        elif config_key == "format":
+            valid_formats = {"text", "json", "github", "sarif", "junit", "gitlab"}
+            if value not in valid_formats:
+                print(
+                    f"Error: invalid {env_var}='{value}' -- must be one of: "
+                    + ", ".join(sorted(valid_formats)),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            env_config[config_key] = value
+        else:
+            env_config[config_key] = value
+    return env_config
 
 
 def main():
@@ -4780,7 +4862,7 @@ def main():
         )
         sys.exit(1)
 
-    paths, output_format, min_severity, fail_on, select, ignore, scope_filter = (
+    paths, cli_format, cli_severity, cli_fail, cli_select, cli_ignore, scope_filter = (
         _parse_args(
             raw_args,
         )
@@ -4789,13 +4871,23 @@ def main():
     # Load config from nearest pyproject.toml
     config = load_config(paths[0])
 
-    # CLI --select / --ignore override config
-    if select is not None:
-        config["select"] = select
-    if ignore is not None:
-        config["ignore"] = ignore
+    # Layer env vars on top of pyproject.toml (env > pyproject.toml)
+    env_config = _read_env_config()
+    for key, value in env_config.items():
+        config[key] = value
 
-    # Config fallback for --baseline
+    # Resolve with precedence: CLI > env vars (in config) > pyproject.toml (in config) > defaults
+    output_format = cli_format or config.get("format") or "text"
+    min_severity = cli_severity or config.get("min-severity") or "info"
+    fail_on = cli_fail or config.get("fail-on") or "error"
+
+    # CLI --select / --ignore override config (which already includes env vars)
+    if cli_select is not None:
+        config["select"] = cli_select
+    if cli_ignore is not None:
+        config["ignore"] = cli_ignore
+
+    # Config fallback for --baseline (env vars already merged into config)
     if baseline_path_str is None and not generate_baseline:
         baseline_path_str = config.get("baseline")
 
