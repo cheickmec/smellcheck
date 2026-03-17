@@ -154,6 +154,8 @@ extends = ["base.toml", "strict.toml"]
 
 Paths are relative to the file containing the `extends` key. Chains are resolved recursively (up to 5 levels deep).
 
+See the [Configuration Reference](https://github.com/cheickmec/smellcheck/blob/main/docs/configuration.md) for the full CLI flag table, JSON/baseline schemas, exit codes, and flag interaction details.
+
 ## Suppression
 
 ### Per-line
