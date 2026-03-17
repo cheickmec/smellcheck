@@ -3879,6 +3879,7 @@ def _detect_lazy_modules(all_data: list[FileData]) -> list[Finding]:
         reexport_ratio = fd.import_statement_count / fd.total_statements
         if reexport_ratio <= 0.8:
             continue
+        extra = " (defines __all__)" if fd.has_all_export else ""
         findings.append(
             _make_finding(
                 file=fd.filepath,
@@ -3887,7 +3888,7 @@ def _detect_lazy_modules(all_data: list[FileData]) -> list[Finding]:
                 name="Lazy Re-export Module",
                 severity="info",
                 message=f"Module has {fd.import_statement_count} imports and "
-                f"{fd.total_statements} statements with no functions or classes "
+                f"{fd.total_statements} statements with no functions or classes{extra} "
                 f"-- consider importing directly from the source modules",
                 category="architecture",
             )
@@ -4085,6 +4086,7 @@ def scan_paths(
         all_findings.extend(_detect_high_coupling(all_file_data))
         all_findings.extend(_detect_high_rfc(all_file_data))
         all_findings.extend(_detect_middle_man(all_file_data))
+        all_findings.extend(_detect_lazy_modules(all_file_data))
 
     # --- Apply inline + block suppression ---
     source_cache: dict[str, list[str]] = {}
