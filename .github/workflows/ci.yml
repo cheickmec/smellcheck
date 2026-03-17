@@ -35,6 +35,19 @@ jobs:
       - name: Self-check
         run: smellcheck src/smellcheck/ --min-severity warning
 
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install package and type deps
+        run: pip install -e ".[type]"
+      - name: Run mypy
+        run: mypy src/smellcheck/
+        continue-on-error: true
+
   code-scanning:
     runs-on: ubuntu-latest
     permissions:
