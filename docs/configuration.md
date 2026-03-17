@@ -111,6 +111,7 @@ The default `--fail-on` is `error`, so smellcheck exits 0 unless an error-severi
 
 - **`--select` + `--ignore`**: `--select` runs first (whitelist), then `--ignore` removes from that set. If only `--ignore` is provided, all rules run except the ignored ones.
 - **`--plan` + `--generate-baseline`**: Mutually exclusive. Using both produces an error.
+- **`--diff` + `--generate-baseline`**: Mutually exclusive. A diff-scoped scan covers only changed files, so the resulting baseline would be incomplete. Run `--generate-baseline` without `--diff` to capture the full codebase baseline.
 - **`--diff` + cross-file checks**: Cross-file checks run on the changed file set only (best-effort). For full accuracy, run without `--diff` periodically.
 - **`--min-severity` vs `--fail-on`**: `--min-severity` controls display filtering. `--fail-on` controls the exit code. You can display all findings (`--min-severity info`) but only fail on warnings (`--fail-on warning`).
 

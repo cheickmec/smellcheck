@@ -33,7 +33,7 @@ class Mailer:
 
 ## SC802 — Coupling Between Objects (CBO)
 
-**What it measures:** How many distinct external classes a given class references by name — counted by detecting attribute accesses on uppercase-named variables within method bodies (e.g. `Foo.bar`, `Bar().method()`). High CBO means a change in any of those dependencies may force changes here too.
+**What it measures:** How many distinct external classes a given class references by name — counted by detecting attribute accesses on uppercase-named variables within method bodies (e.g. `Foo.bar`, `Bar.method`). High CBO means a change in any of those dependencies may force changes here too.
 
 **Threshold:** > 8 (severity: warning)
 
@@ -41,11 +41,11 @@ class Mailer:
 ```python
 class Order:
     def process(self):
-        Inventory().check()
-        Payment().charge()
-        Shipping().ship()
-        Email().send()
-        Logger().log()
+        Inventory.check(self.items)
+        Payment.charge(self.total)
+        Shipping.ship(self.address)
+        Email.send(self.user)
+        Logger.log(self.id)
 ```
 
 **After:**
