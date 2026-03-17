@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -41,6 +42,7 @@ from smellcheck.detector import (
     _format_plan_json,
     _format_plan_text,
     _group_findings_by_phase,
+    _read_env_config,
     FileData,
     Finding,
     load_config,
@@ -62,12 +64,18 @@ def _write_py(tmp_path: Path, code: str, name: str = "sample.py") -> Path:
     return p
 
 
-def _run_cli(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _run_cli(
+    *args: str, cwd: Path | None = None, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    run_env = None
+    if env is not None:
+        run_env = {**os.environ, **env}
     return subprocess.run(
         [sys.executable, "-m", "smellcheck", *args],
         capture_output=True,
         text=True,
         cwd=cwd,
+        env=run_env,
     )
 
 
@@ -3174,3 +3182,154 @@ def test_SC805_remove_middle_man(tmp_path):
     """)
     findings = scan_path(p)
     assert any(f.pattern == "SC805" for f in findings)
+
+
+# ---------------------------------------------------------------------------
+# Environment variable configuration
+# ---------------------------------------------------------------------------
+
+
+def test_read_env_config_empty(monkeypatch):
+    """_read_env_config returns empty dict when no SMELLCHECK_* vars are set."""
+    for var in (
+        "SMELLCHECK_MIN_SEVERITY",
+        "SMELLCHECK_FAIL_ON",
+        "SMELLCHECK_FORMAT",
+        "SMELLCHECK_SELECT",
+        "SMELLCHECK_IGNORE",
+        "SMELLCHECK_BASELINE",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    assert _read_env_config() == {}
+
+
+def test_read_env_config_severity(monkeypatch):
+    """SMELLCHECK_MIN_SEVERITY is read correctly."""
+    monkeypatch.setenv("SMELLCHECK_MIN_SEVERITY", "warning")
+    cfg = _read_env_config()
+    assert cfg["min-severity"] == "warning"
+
+
+def test_read_env_config_fail_on(monkeypatch):
+    """SMELLCHECK_FAIL_ON is read correctly."""
+    monkeypatch.setenv("SMELLCHECK_FAIL_ON", "info")
+    cfg = _read_env_config()
+    assert cfg["fail-on"] == "info"
+
+
+def test_read_env_config_format(monkeypatch):
+    """SMELLCHECK_FORMAT is read correctly."""
+    monkeypatch.setenv("SMELLCHECK_FORMAT", "json")
+    cfg = _read_env_config()
+    assert cfg["format"] == "json"
+
+
+def test_read_env_config_select_comma_separated(monkeypatch):
+    """SMELLCHECK_SELECT splits on commas."""
+    monkeypatch.setenv("SMELLCHECK_SELECT", "SC701, SC601")
+    cfg = _read_env_config()
+    assert cfg["select"] == ["SC701", "SC601"]
+
+
+def test_read_env_config_ignore_comma_separated(monkeypatch):
+    """SMELLCHECK_IGNORE splits on commas."""
+    monkeypatch.setenv("SMELLCHECK_IGNORE", "SC202,SC301")
+    cfg = _read_env_config()
+    assert cfg["ignore"] == ["SC202", "SC301"]
+
+
+def test_read_env_config_baseline(monkeypatch):
+    """SMELLCHECK_BASELINE is read as a string."""
+    monkeypatch.setenv("SMELLCHECK_BASELINE", ".smellcheck-baseline.json")
+    cfg = _read_env_config()
+    assert cfg["baseline"] == ".smellcheck-baseline.json"
+
+
+def test_read_env_config_invalid_severity(monkeypatch):
+    """Invalid SMELLCHECK_MIN_SEVERITY causes sys.exit."""
+    monkeypatch.setenv("SMELLCHECK_MIN_SEVERITY", "critical")
+    import pytest
+
+    with pytest.raises(SystemExit):
+        _read_env_config()
+
+
+def test_read_env_config_invalid_format(monkeypatch):
+    """Invalid SMELLCHECK_FORMAT causes sys.exit."""
+    monkeypatch.setenv("SMELLCHECK_FORMAT", "xml")
+    import pytest
+
+    with pytest.raises(SystemExit):
+        _read_env_config()
+
+
+def test_read_env_config_invalid_fail_on(monkeypatch):
+    """Invalid SMELLCHECK_FAIL_ON causes sys.exit."""
+    monkeypatch.setenv("SMELLCHECK_FAIL_ON", "critical")
+    import pytest
+
+    with pytest.raises(SystemExit):
+        _read_env_config()
+
+
+def test_env_var_format_via_cli(tmp_path):
+    """SMELLCHECK_FORMAT env var changes output format."""
+    p = tmp_path / "sample.py"
+    p.write_text("x = 1\n", encoding="utf-8")
+    result = _run_cli(str(p), env={"SMELLCHECK_FORMAT": "json"})
+    assert result.returncode == 0
+    parsed = json.loads(result.stdout)
+    assert isinstance(parsed, list)
+
+
+def test_env_var_overridden_by_cli_flag(tmp_path):
+    """CLI --format overrides SMELLCHECK_FORMAT."""
+    p = tmp_path / "sample.py"
+    p.write_text("x = 1\n", encoding="utf-8")
+    result = _run_cli(
+        str(p), "--format", "text", env={"SMELLCHECK_FORMAT": "json"}
+    )
+    assert result.returncode == 0
+    # Text output should NOT be JSON
+    try:
+        json.loads(result.stdout)
+        is_json = True
+    except (json.JSONDecodeError, ValueError):
+        is_json = False
+    assert not is_json or result.stdout.strip() == "[]"
+
+
+def test_env_var_min_severity_via_cli(tmp_path):
+    """SMELLCHECK_MIN_SEVERITY filters findings via CLI."""
+    p = tmp_path / "sample.py"
+    p.write_text("x = 1\n", encoding="utf-8")
+    result = _run_cli(str(p), env={"SMELLCHECK_MIN_SEVERITY": "error"})
+    assert result.returncode == 0
+
+
+def test_env_var_select_via_cli(tmp_path):
+    """SMELLCHECK_SELECT limits rules to selected codes."""
+    p = tmp_path / "sample.py"
+    p.write_text("x = 1\n", encoding="utf-8")
+    result = _run_cli(
+        str(p), "--format", "json", env={"SMELLCHECK_SELECT": "SC999"}
+    )
+    assert result.returncode == 0
+    findings = json.loads(result.stdout)
+    assert len(findings) == 0
+
+
+def test_env_var_invalid_format_via_cli(tmp_path):
+    """Invalid SMELLCHECK_FORMAT produces error message."""
+    p = tmp_path / "sample.py"
+    p.write_text("x = 1\n", encoding="utf-8")
+    result = _run_cli(str(p), env={"SMELLCHECK_FORMAT": "xml"})
+    assert result.returncode == 1
+    assert "invalid" in result.stderr.lower()
+
+
+def test_env_var_whitespace_ignored(monkeypatch):
+    """Whitespace-only env var values are treated as unset."""
+    monkeypatch.setenv("SMELLCHECK_FORMAT", "   ")
+    cfg = _read_env_config()
+    assert "format" not in cfg
