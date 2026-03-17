@@ -72,6 +72,28 @@ When extending configs:
 | `fail-on`, `format`, `baseline`, `cache`, `cache-dir` | Override (child wins) |
 | `extends` | Consumed and stripped |
 
+## Environment Variables
+
+Set `SMELLCHECK_*` environment variables as a configuration layer between pyproject.toml defaults and CLI flag overrides.
+
+| Variable | Equivalent CLI | Example |
+|----------|---------------|---------|
+| `SMELLCHECK_MIN_SEVERITY` | `--min-severity` | `warning` |
+| `SMELLCHECK_FAIL_ON` | `--fail-on` | `warning` |
+| `SMELLCHECK_FORMAT` | `--format` | `json` |
+| `SMELLCHECK_SELECT` | `--select` | `SC701,SC601` |
+| `SMELLCHECK_IGNORE` | `--ignore` | `SC202` |
+| `SMELLCHECK_BASELINE` | `--baseline` | `.smellcheck-baseline.json` |
+
+**Precedence:** CLI flags > environment variables > pyproject.toml > defaults
+
+List values (`SELECT`, `IGNORE`) use comma-separated syntax. Invalid values produce a clear error and exit 1.
+
+```bash
+# CI example: fail on warnings, output JSON
+SMELLCHECK_FAIL_ON=warning SMELLCHECK_FORMAT=json smellcheck src/
+```
+
 ## Inline Suppression
 
 ### Line-level
