@@ -405,7 +405,7 @@ def test_cli_help():
 
 
 def test_rule_registry_complete():
-    """Registry has 56 entries with valid families and scopes."""
+    """Registry has 57 entries with valid families and scopes."""
     assert len(_RULE_REGISTRY) == 57
     for key, rd in _RULE_REGISTRY.items():
         assert key.startswith("SC"), f"Key {key!r} must start with 'SC'"

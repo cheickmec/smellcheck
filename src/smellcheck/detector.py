@@ -1028,7 +1028,7 @@ def _resolve_extends(
 # ---------------------------------------------------------------------------
 
 _DEFAULT_CACHE_DIR: Final = ".smellcheck-cache"
-_CACHE_VERSION: Final = 1
+_CACHE_VERSION: Final = 2
 
 
 def _cache_key(source: str, config_hash: str, version: str) -> str:
@@ -1158,6 +1158,7 @@ def _serialize_file_data(fd: FileData) -> dict:
         "total_statements": fd.total_statements,
         "import_statement_count": fd.import_statement_count,
         "has_all_export": fd.has_all_export,
+        "non_import_assign_count": fd.non_import_assign_count,
         "is_init": fd.is_init,
     }
 
@@ -1188,6 +1189,7 @@ def _deserialize_file_data(d: dict) -> FileData:
         total_statements=d.get("total_statements", 0),
         import_statement_count=d.get("import_statement_count", 0),
         has_all_export=d.get("has_all_export", False),
+        non_import_assign_count=d.get("non_import_assign_count", 0),
         is_init=d.get("is_init", False),
     )
 
@@ -1821,6 +1823,7 @@ class FileData:
     total_statements: int = 0  # top-level statement count
     import_statement_count: int = 0  # number of import/from-import statements
     has_all_export: bool = False  # has __all__ assignment
+    non_import_assign_count: int = 0  # top-level assignments that are NOT __all__ (constants/aliases)
     is_init: bool = False  # is an __init__.py file
 
 
@@ -3296,6 +3299,7 @@ def scan_file(
     cls_count = 0
     import_count = 0
     has_all = False
+    non_import_assign = 0
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             func_count += 1
@@ -3304,13 +3308,22 @@ def scan_file(
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             import_count += 1
         elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "__all__":
-                    has_all = True
+            is_all = any(
+                isinstance(t, ast.Name) and t.id == "__all__"
+                for t in node.targets
+            )
+            if is_all:
+                has_all = True
+            else:
+                non_import_assign += 1
+        elif isinstance(node, ast.AnnAssign):
+            # annotated assignments (e.g. type aliases, typed constants)
+            non_import_assign += 1
     detector.file_data.function_def_count = func_count
     detector.file_data.class_def_count = cls_count
     detector.file_data.import_statement_count = import_count
     detector.file_data.has_all_export = has_all
+    detector.file_data.non_import_assign_count = non_import_assign
 
     return detector.findings, detector.file_data
 
@@ -3875,11 +3888,15 @@ def _detect_lazy_modules(all_data: list[FileData]) -> list[Finding]:
         # Must have 1+ import statements
         if fd.import_statement_count < 1:
             continue
-        # Compute re-export ratio: import statements / total statements
-        reexport_ratio = fd.import_statement_count / fd.total_statements
+        # Exception: modules with meaningful constant/type-alias assignments are not
+        # lazy re-export modules -- they add semantic value beyond re-exporting.
+        if fd.non_import_assign_count > 0:
+            continue
+        # Compute import ratio: import statements / total statements
+        import_ratio = fd.import_statement_count / fd.total_statements
         # Use a stricter threshold when __all__ is absent (less certain it's a re-export module)
         threshold = 0.8 if fd.has_all_export else 0.9
-        if reexport_ratio <= threshold:
+        if import_ratio <= threshold:
             continue
         extra = " (defines __all__)" if fd.has_all_export else ""
         findings.append(
