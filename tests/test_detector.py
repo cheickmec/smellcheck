@@ -67,15 +67,16 @@ def _write_py(tmp_path: Path, code: str, name: str = "sample.py") -> Path:
 def _run_cli(
     *args: str, cwd: Path | None = None, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
-    run_env = None
-    if env is not None:
-        run_env = {**os.environ, **env}
+    # Strip any pre-existing SMELLCHECK_* vars to prevent leaking into subprocess tests
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("SMELLCHECK_")}
+    if env:
+        clean_env.update(env)
     return subprocess.run(
         [sys.executable, "-m", "smellcheck", *args],
         capture_output=True,
         text=True,
         cwd=cwd,
-        env=run_env,
+        env=clean_env,
     )
 
 

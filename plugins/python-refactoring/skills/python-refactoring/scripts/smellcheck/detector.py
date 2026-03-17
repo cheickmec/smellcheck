@@ -3877,7 +3877,9 @@ def _detect_lazy_modules(all_data: list[FileData]) -> list[Finding]:
             continue
         # Compute re-export ratio: import statements / total statements
         reexport_ratio = fd.import_statement_count / fd.total_statements
-        if reexport_ratio <= 0.8:
+        # Use a stricter threshold when __all__ is absent (less certain it's a re-export module)
+        threshold = 0.8 if fd.has_all_export else 0.9
+        if reexport_ratio <= threshold:
             continue
         extra = " (defines __all__)" if fd.has_all_export else ""
         findings.append(
@@ -4965,6 +4967,22 @@ def main():
     output_format = cli_format or config.get("format") or "text"
     min_severity = cli_severity or config.get("min-severity") or "info"
     fail_on = cli_fail or config.get("fail-on") or "error"
+
+    # Validate resolved values (env/pyproject may supply invalid strings that bypass CLI validation)
+    valid_formats = {"text", "json", "github", "sarif", "junit", "gitlab"}
+    if output_format not in valid_formats:
+        print(
+            f"error: invalid format '{output_format}' (choose from {', '.join(sorted(valid_formats))})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    valid_severities = {"info", "warning", "error"}
+    if min_severity not in valid_severities:
+        print(f"error: invalid min-severity '{min_severity}'", file=sys.stderr)
+        sys.exit(1)
+    if fail_on and fail_on not in valid_severities:
+        print(f"error: invalid fail-on '{fail_on}'", file=sys.stderr)
+        sys.exit(1)
 
     # CLI --select / --ignore override config (which already includes env vars)
     if cli_select is not None:
