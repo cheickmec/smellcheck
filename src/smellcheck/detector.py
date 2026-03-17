@@ -3,7 +3,7 @@
 Python Code Smell Detector — SC-coded rules organized by family.
 
 Self-contained: stdlib only (ast, pathlib, sys, json, collections, re, textwrap).
-Detects 56 patterns programmatically (41 per-file + 10 cross-file + 5 OO metrics).
+Detects 57 patterns programmatically (41 per-file + 11 cross-file + 5 OO metrics).
 
 Usage:
     smellcheck path/to/file_or_dir [--format json] [--min-severity info]
@@ -109,6 +109,7 @@ _RULE_REGISTRY: dict[str, RuleDef] = {
     "SC506": RuleDef("SC506", "Inappropriate Intimacy", "architecture", "cross_file", "info"),
     "SC507": RuleDef("SC507", "Remove Speculative Generality", "architecture", "cross_file", "info"),
     "SC508": RuleDef("SC508", "Unstable Dependency", "architecture", "cross_file", "info"),
+    "SC509": RuleDef("SC509", "Lazy Re-export Module", "architecture", "cross_file", "info"),
     # --- Family 6: Hygiene (SC6xx) ---
     "SC601": RuleDef("SC601", "Extract Constant", "hygiene", "file", "info"),
     "SC602": RuleDef("SC602", "Remove Unhandled Exceptions", "hygiene", "file", "error"),
@@ -179,6 +180,7 @@ _RULE_DESCRIPTIONS: dict[str, str] = {
     "SC506": "Two classes share too many internals, indicating inappropriate intimacy.",
     "SC507": "Abstract base class with no concrete implementations — speculative generality.",
     "SC508": "A stable module depends on a more volatile one, inverting the dependency direction.",
+    "SC509": "Module only re-exports imported symbols with no logic of its own — consider importing directly.",
     # Hygiene
     "SC601": "Magic numbers or strings with no named constant to explain their meaning.",
     "SC602": "Bare except clause swallows all exceptions including KeyboardInterrupt.",
@@ -361,6 +363,7 @@ _RULE_EXAMPLES: dict[str, tuple[str, str] | None] = {
     "SC506": None,  # cross-file — inappropriate intimacy
     "SC507": None,  # cross-file — speculative generality
     "SC508": None,  # cross-file — unstable dependency
+    "SC509": None,  # cross-file — lazy re-export module
     # --- Hygiene ---
     "SC601": (
         "if retry_count > 3:\n    time.sleep(60)",
@@ -522,7 +525,7 @@ _REFACTORING_PHASES: tuple[dict, ...] = (
         "description": "Break cycles, split god modules, fix cross-file coupling and duplication.",
         "rules": [
             "SC503", "SC504", "SC606", "SC505", "SC501", "SC502",
-            "SC506", "SC507", "SC508", "SC211", "SC308", "SC309", "SC301",
+            "SC506", "SC507", "SC508", "SC509", "SC211", "SC308", "SC309", "SC301",
         ],
         "execution": "parallel",
         "internal_order": [["SC503", "SC504", "SC606", "SC505"]],
@@ -1150,6 +1153,12 @@ def _serialize_file_data(fd: FileData) -> dict:
         "defined_functions": sorted(fd.defined_functions),
         "called_functions": sorted(fd.called_functions),
         "abstract_classes": sorted(fd.abstract_classes),
+        "function_def_count": fd.function_def_count,
+        "class_def_count": fd.class_def_count,
+        "total_statements": fd.total_statements,
+        "import_statement_count": fd.import_statement_count,
+        "has_all_export": fd.has_all_export,
+        "is_init": fd.is_init,
     }
 
 
@@ -1174,6 +1183,12 @@ def _deserialize_file_data(d: dict) -> FileData:
         defined_functions=set(d.get("defined_functions", [])),
         called_functions=set(d.get("called_functions", [])),
         abstract_classes=set(d.get("abstract_classes", [])),
+        function_def_count=d.get("function_def_count", 0),
+        class_def_count=d.get("class_def_count", 0),
+        total_statements=d.get("total_statements", 0),
+        import_statement_count=d.get("import_statement_count", 0),
+        has_all_export=d.get("has_all_export", False),
+        is_init=d.get("is_init", False),
     )
 
 
@@ -1800,6 +1815,13 @@ class FileData:
     abstract_classes: set[str] = field(
         default_factory=set
     )  # classes with ABC or abstract methods
+    # --- SC509 lazy module detection ---
+    function_def_count: int = 0  # top-level function defs (not methods)
+    class_def_count: int = 0  # top-level class defs
+    total_statements: int = 0  # top-level statement count
+    import_statement_count: int = 0  # number of import/from-import statements
+    has_all_export: bool = False  # has __all__ assignment
+    is_init: bool = False  # is an __init__.py file
 
 
 # ---------------------------------------------------------------------------
@@ -3266,6 +3288,30 @@ def scan_file(
     detector.visit(tree)
     detector.finalize()
     detector.file_data.imports = _extract_imports(tree)
+
+    # Populate SC509 lazy-module fields from the AST
+    detector.file_data.is_init = filepath.name == "__init__.py"
+    detector.file_data.total_statements = len(tree.body)
+    func_count = 0
+    cls_count = 0
+    import_count = 0
+    has_all = False
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            func_count += 1
+        elif isinstance(node, ast.ClassDef):
+            cls_count += 1
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            import_count += 1
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "__all__":
+                    has_all = True
+    detector.file_data.function_def_count = func_count
+    detector.file_data.class_def_count = cls_count
+    detector.file_data.import_statement_count = import_count
+    detector.file_data.has_all_export = has_all
+
     return detector.findings, detector.file_data
 
 
@@ -3814,6 +3860,41 @@ def _detect_middle_man(all_data: list[FileData]) -> list[Finding]:
     return findings
 
 
+def _detect_lazy_modules(all_data: list[FileData]) -> list[Finding]:
+    """SC509 -- Modules that only re-export imported symbols with no logic."""
+    findings: list[Finding] = []
+    for fd in all_data:
+        # Exceptions: __init__.py, modules under 5 statements
+        if fd.is_init:
+            continue
+        if fd.total_statements < 5:
+            continue
+        # Must have 0 function/class definitions
+        if fd.function_def_count > 0 or fd.class_def_count > 0:
+            continue
+        # Must have 1+ import statements
+        if fd.import_statement_count < 1:
+            continue
+        # Compute re-export ratio: import statements / total statements
+        reexport_ratio = fd.import_statement_count / fd.total_statements
+        if reexport_ratio <= 0.8:
+            continue
+        findings.append(
+            _make_finding(
+                file=fd.filepath,
+                line=1,
+                pattern="SC509",
+                name="Lazy Re-export Module",
+                severity="info",
+                message=f"Module has {fd.import_statement_count} imports and "
+                f"{fd.total_statements} statements with no functions or classes "
+                f"-- consider importing directly from the source modules",
+                category="architecture",
+            )
+        )
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Cross-file analysis dispatcher
 # ---------------------------------------------------------------------------
@@ -3834,6 +3915,7 @@ def cross_file_analysis(all_data: list[FileData]) -> list[Finding]:
     findings.extend(_detect_inappropriate_intimacy(all_data))
     findings.extend(_detect_speculative_generality(all_data))
     findings.extend(_detect_unstable_dependency(all_data))
+    findings.extend(_detect_lazy_modules(all_data))
     # Tier 3: OO metrics
     findings.extend(_detect_low_cohesion(all_data))
     findings.extend(_detect_high_coupling(all_data))
@@ -3884,6 +3966,7 @@ def scan_path(target: Path) -> list[Finding]:
         all_findings.extend(_detect_high_coupling(all_file_data))
         all_findings.extend(_detect_high_rfc(all_file_data))
         all_findings.extend(_detect_middle_man(all_file_data))
+        all_findings.extend(_detect_lazy_modules(all_file_data))
 
     return all_findings
 
