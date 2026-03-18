@@ -3328,7 +3328,11 @@ def scan_file(
                 non_import_assign += 1
         elif isinstance(node, ast.AnnAssign):
             # annotated assignments (e.g. type aliases, typed constants)
-            non_import_assign += 1
+            # exclude __all__ annotations the same as regular __all__ assignments
+            if isinstance(node.target, ast.Name) and node.target.id == "__all__":
+                has_all = True
+            else:
+                non_import_assign += 1
     detector.file_data.function_def_count = func_count
     detector.file_data.class_def_count = cls_count
     detector.file_data.import_statement_count = import_count
@@ -5005,10 +5009,10 @@ def main():
         sys.exit(1)
     valid_severities = {"info", "warning", "error"}
     if min_severity not in valid_severities:
-        print(f"Error: invalid min-severity '{min_severity}'", file=sys.stderr)
+        print(f"Error: invalid min-severity '{min_severity}' (must be one of: info, warning, error)", file=sys.stderr)
         sys.exit(1)
     if fail_on and fail_on not in valid_severities:
-        print(f"Error: invalid fail-on '{fail_on}'", file=sys.stderr)
+        print(f"Error: invalid fail-on '{fail_on}' (must be one of: info, warning, error)", file=sys.stderr)
         sys.exit(1)
 
     # CLI --select / --ignore override config (which already includes env vars)

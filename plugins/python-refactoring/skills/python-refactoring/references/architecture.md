@@ -158,7 +158,7 @@ from mypackage.core import Foo as PublicFoo  # explicit public API
 __all__ = ["PublicFoo"]  # signal intent
 ```
 
-**Detection:** File has only import statements and no non-import assignments, function/class definitions, or executable logic. Modules with `__all__` that explicitly curate a public API are excluded.
+**Detection:** File has only import statements and no non-import assignments, function/class definitions, or executable logic. Modules with `__all__` use a lower detection threshold (0.8 vs 0.9) since `__all__` is a stronger re-export signal.
 
 **SC code:** SC509  |  **Severity:** info  |  **Scope:** cross\_file
 
