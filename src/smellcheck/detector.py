@@ -396,6 +396,7 @@ _RULE_EXAMPLES: dict[str, tuple[str, str] | None] = {
         "async def handler(request):\n    await asyncio.sleep(5)\n    data = await aiohttp.get(url)",
     ),
     # --- Metrics ---
+    # NB: examples are illustrative patterns, not threshold-triggering code
     "SC801": (
         "class Blob:\n    def parse(self): self.data = read()\n    def send_email(self): smtp.send(self.to)",
         "class Parser:\n    def parse(self): self.data = read()\n\nclass Mailer:\n    def send_email(self): smtp.send(self.to)",
