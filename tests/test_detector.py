@@ -3451,12 +3451,18 @@ from core.utils import helper2
 
 
 def test_sc509_module_with_constants_excluded(tmp_path):
-    """SC509: module with constant assignments is not a lazy re-export."""
+    """SC509: module with constant assignments is not a lazy re-export.
+
+    Uses >= 5 statements so the test exercises the constants exclusion,
+    not the 'modules under 5 statements' skip.
+    """
     p = _write_py(tmp_path, '''
 DEFAULT_TIMEOUT = 30
 MAX_RETRIES = 3
+BASE_URL = "https://api.example.com"
 from core.http import get, post, put, delete, patch
 from core.auth import authenticate
+from core.utils import retry
 ''', name="config.py")
     findings = scan_path(p)
     assert not any(f.pattern == "SC509" for f in findings)
