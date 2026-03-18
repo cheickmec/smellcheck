@@ -4873,7 +4873,9 @@ def _read_env_config() -> dict:
             continue
 
         if config_key in ("select", "ignore"):
-            env_config[config_key] = [c.strip() for c in value.split(",") if c.strip()]
+            codes = [c.strip() for c in value.split(",") if c.strip()]
+            if codes:
+                env_config[config_key] = codes
         elif config_key == "min-severity":
             if value not in SEVERITY_ORDER:
                 print(
