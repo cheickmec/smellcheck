@@ -3273,6 +3273,20 @@ def test_read_env_config_invalid_fail_on(monkeypatch):
         _read_env_config()
 
 
+def test_read_env_config_comma_only_select(monkeypatch):
+    """SMELLCHECK_SELECT=',' should not set an empty select list."""
+    monkeypatch.setenv("SMELLCHECK_SELECT", ",")
+    cfg = _read_env_config()
+    assert "select" not in cfg
+
+
+def test_read_env_config_comma_only_ignore(monkeypatch):
+    """SMELLCHECK_IGNORE=',,' should not set an empty ignore list."""
+    monkeypatch.setenv("SMELLCHECK_IGNORE", ",,")
+    cfg = _read_env_config()
+    assert "ignore" not in cfg
+
+
 def test_env_var_format_via_cli(tmp_path):
     """SMELLCHECK_FORMAT env var changes output format."""
     p = tmp_path / "sample.py"
