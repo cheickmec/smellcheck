@@ -25,7 +25,7 @@
 
 ## pyproject.toml Configuration
 
-smellcheck reads `[tool.smellcheck]` from the nearest `pyproject.toml`. CLI flags override config values.
+smellcheck reads `[tool.smellcheck]` from the nearest `pyproject.toml`. Precedence: CLI flags > environment variables > pyproject.toml > defaults.
 
 ```toml
 [tool.smellcheck]
