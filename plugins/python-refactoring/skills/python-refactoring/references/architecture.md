@@ -148,17 +148,18 @@ def withdraw(account, amount):
 ```python
 # Before — lazy_reexport.py just forwards everything
 from mypackage.core import Foo, Bar, baz
-from mypackage.utils import helper
+from mypackage.utils import helper1, helper2
+from mypackage.config import DEFAULT, TIMEOUT
+from mypackage.io import read_data
 
-# After — expose a real public API with intent
-# Either delete the shim and import directly from the source module,
-# or turn it into a proper facade that adds documentation, validation,
+# After — import directly from source modules, or turn the shim
+# into a proper facade that adds documentation, validation,
 # or a stable interface contract:
 from mypackage.core import Foo as PublicFoo  # explicit public API
 __all__ = ["PublicFoo"]  # signal intent
 ```
 
-**Detection:** File has only import statements and no non-import assignments, function/class definitions, or executable logic. Modules with `__all__` use a lower detection threshold (0.8 vs 0.9) since `__all__` is a stronger re-export signal.
+**Detection:** File has ≥ 5 top-level statements, only import statements, and no non-import assignments, function/class definitions, or executable logic. `__init__.py` files are excluded (they are expected to re-export). Modules with `__all__` use a lower detection threshold (import ratio > 0.8) since `__all__` is a stronger re-export signal; without `__all__`, the threshold is stricter (> 0.9). Modules with constant assignments or type aliases are excluded.
 
 **SC code:** SC509  |  **Severity:** info  |  **Scope:** cross\_file
 
