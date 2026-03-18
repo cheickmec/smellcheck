@@ -3291,13 +3291,11 @@ def test_env_var_overridden_by_cli_flag(tmp_path):
         str(p), "--format", "text", env={"SMELLCHECK_FORMAT": "json"}
     )
     assert result.returncode == 0
-    # Text output should NOT be JSON
-    try:
-        json.loads(result.stdout)
-        is_json = True
-    except (json.JSONDecodeError, ValueError):
-        is_json = False
-    assert not is_json or result.stdout.strip() == "[]"
+    # Text output must NOT be JSON — verify the CLI flag overrode the env var.
+    stdout = result.stdout.strip()
+    assert not stdout.startswith("[") and not stdout.startswith("{"), (
+        f"Expected text format but got JSON-like output: {stdout[:80]!r}"
+    )
 
 
 def test_env_var_min_severity_via_cli(tmp_path):
@@ -3402,6 +3400,25 @@ def test_sc509_module_with_logic_not_flagged(tmp_path):
     findings = scan_path(p)
     sc509 = [f for f in findings if f.pattern == "SC509"]
     assert len(sc509) == 0
+
+
+def test_sc509_lazy_reexport_with_docstring(tmp_path):
+    """SC509 should still detect lazy modules that have a module docstring."""
+    p = _write_py(
+        tmp_path,
+        '''\
+        """This module re-exports everything."""
+        from core.models import User
+        from core.models import Order
+        from core.models import Product
+        from core.utils import helper1
+        from core.utils import helper2
+        from core.utils import helper3
+        ''',
+        name="shim.py",
+    )
+    findings = scan_path(p)
+    assert any(f.pattern == "SC509" for f in findings)
 
 
 def test_sc509_small_module_excluded(tmp_path):

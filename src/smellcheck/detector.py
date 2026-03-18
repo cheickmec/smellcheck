@@ -3294,7 +3294,17 @@ def scan_file(
 
     # Populate SC509 lazy-module fields from the AST
     detector.file_data.is_init = filepath.name == "__init__.py"
-    detector.file_data.total_statements = len(tree.body)
+    # Exclude module docstring from statement count so it doesn't inflate
+    # the denominator and artificially lower the import ratio for SC509.
+    _body = tree.body
+    if (
+        _body
+        and isinstance(_body[0], ast.Expr)
+        and isinstance(getattr(_body[0], "value", None), ast.Constant)
+        and isinstance(_body[0].value.value, str)
+    ):
+        _body = _body[1:]
+    detector.file_data.total_statements = len(_body)
     func_count = 0
     cls_count = 0
     import_count = 0
