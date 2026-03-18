@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Python Code Smell Detector & Refactoring Guide</strong><br>
-  83 refactoring patterns &middot; 56 automated AST checks &middot; zero dependencies
+  83 refactoring patterns &middot; 57 automated AST checks &middot; zero dependencies
 </p>
 
 <p align="center">
@@ -291,7 +291,7 @@ cache-dir = ".smellcheck-cache"  # custom cache directory
 
 ## Features
 
-- **56 automated smell checks** -- per-file AST analysis, cross-file dependency analysis, and OO metrics
+- **57 automated smell checks** -- per-file AST analysis, cross-file dependency analysis, and OO metrics
 - **83 refactoring patterns** -- numbered catalog with before/after examples, trade-offs, and severity levels
 - **Zero dependencies** -- stdlib-only, runs on any Python 3.10+ installation
 - **Multiple output formats** -- text (terminal), JSON (machine-readable), GitHub annotations (CI), SARIF 2.1.0 (Code Scanning), JUnit XML (Jenkins/GitLab/CircleCI), GitLab CodeClimate (MR quality widget)
@@ -409,7 +409,7 @@ Each pattern includes a description, before/after code examples, and trade-offs:
 
 | Feature | smellcheck | [PyExamine](https://github.com/KarthikShivasankar/python_smells_detector) | [SMART-Dal](https://github.com/SMART-Dal/smell-detector-python) | [Pyscent](https://github.com/whyjay17/Pyscent) |
 |---------|------------|-----------|-----------|---------|
-| Automated detections | 56 | 49 | 31 | 11 |
+| Automated detections | 57 | 49 | 31 | 11 |
 | Refactoring guidance | 83 patterns | None | None | None |
 | Dependencies | 0 (stdlib) | pylint, radon | DesigniteJava | pylint, radon, cohesion |
 | Python-specific idioms | Yes | No | No | No |
