@@ -4593,9 +4593,9 @@ _HELP_TEXT: Final = textwrap.dedent("""\
 
     Scan Python files for code smells mapped to the 83-pattern refactoring catalog.
 
-    Detects 56 patterns programmatically:
+    Detects 57 patterns programmatically:
       - 41 per-file (AST analysis)    — SC1xx..SC7xx (scope: file)
-      - 10 cross-file (import graph)  — SC3xx..SC6xx (scope: cross_file)
+      - 11 cross-file (import graph)  — SC3xx..SC6xx (scope: cross_file)
       - 5 OO metrics (LCOM, CBO, …)   — SC8xx        (scope: metric)
 
     Options:
@@ -4999,16 +4999,16 @@ def main():
     valid_formats = {"text", "json", "github", "sarif", "junit", "gitlab"}
     if output_format not in valid_formats:
         print(
-            f"error: invalid format '{output_format}' (choose from {', '.join(sorted(valid_formats))})",
+            f"Error: invalid format '{output_format}' (choose from {', '.join(sorted(valid_formats))})",
             file=sys.stderr,
         )
         sys.exit(1)
     valid_severities = {"info", "warning", "error"}
     if min_severity not in valid_severities:
-        print(f"error: invalid min-severity '{min_severity}'", file=sys.stderr)
+        print(f"Error: invalid min-severity '{min_severity}'", file=sys.stderr)
         sys.exit(1)
     if fail_on and fail_on not in valid_severities:
-        print(f"error: invalid fail-on '{fail_on}'", file=sys.stderr)
+        print(f"Error: invalid fail-on '{fail_on}'", file=sys.stderr)
         sys.exit(1)
 
     # CLI --select / --ignore override config (which already includes env vars)

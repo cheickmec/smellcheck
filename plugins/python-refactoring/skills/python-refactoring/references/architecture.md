@@ -141,6 +141,29 @@ def withdraw(account, amount):
     account.balance -= amount
 ```
 
+## SC509 — Lazy Re-export Module
+
+**Smell:** A module that only imports and re-exports names from other modules without adding value — a pure import shim that increases coupling without providing abstraction.
+
+```python
+# Before — lazy_reexport.py just forwards everything
+from mypackage.core import Foo, Bar, baz
+from mypackage.utils import helper
+
+# After — expose a real public API with intent
+# Either delete the shim and import directly from the source module,
+# or turn it into a proper facade that adds documentation, validation,
+# or a stable interface contract:
+from mypackage.core import Foo as PublicFoo  # explicit public API
+__all__ = ["PublicFoo"]  # signal intent
+```
+
+**Detection:** File has only import statements and no non-import assignments, function/class definitions, or executable logic. Modules with `__all__` that explicitly curate a public API are excluded.
+
+**SC code:** SC509  |  **Severity:** info  |  **Scope:** cross\_file
+
+---
+
 ## 054 — Hide Delegate (Law of Demeter)
 
 **Smell:** Chained attribute access couples you to the entire object graph.
