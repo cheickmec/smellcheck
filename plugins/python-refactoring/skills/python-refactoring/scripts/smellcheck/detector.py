@@ -3981,7 +3981,7 @@ def scan_path(target: Path) -> list[Finding]:
     if len(all_file_data) > 1:
         all_findings.extend(cross_file_analysis(all_file_data))
     elif len(all_file_data) == 1:
-        # Single-file scan: still compute per-class metrics (LCOM, CBO, RFC, MID)
+        # Single-file scan: still compute per-class metrics (LCOM, CBO, RFC, MID) and lazy-module detection
         all_findings.extend(_detect_low_cohesion(all_file_data))
         all_findings.extend(_detect_high_coupling(all_file_data))
         all_findings.extend(_detect_high_rfc(all_file_data))
