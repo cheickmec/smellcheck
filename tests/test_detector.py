@@ -3434,3 +3434,56 @@ def test_sc509_small_module_excluded(tmp_path):
     findings = scan_path(p)
     sc509 = [f for f in findings if f.pattern == "SC509"]
     assert len(sc509) == 0
+
+
+def test_sc509_annotated_all_not_blocked(tmp_path):
+    """SC509: annotated __all__ should not prevent detection."""
+    p = _write_py(tmp_path, '''
+__all__: list[str] = ["User", "Order", "Product"]
+from core.models import User
+from core.models import Order
+from core.models import Product
+from core.utils import helper1
+from core.utils import helper2
+''', name="shim.py")
+    findings = scan_path(p)
+    assert any(f.pattern == "SC509" for f in findings)
+
+
+def test_sc509_module_with_constants_excluded(tmp_path):
+    """SC509: module with constant assignments is not a lazy re-export."""
+    p = _write_py(tmp_path, '''
+DEFAULT_TIMEOUT = 30
+MAX_RETRIES = 3
+from core.http import get, post, put, delete, patch
+from core.auth import authenticate
+''', name="config.py")
+    findings = scan_path(p)
+    assert not any(f.pattern == "SC509" for f in findings)
+
+
+def test_env_var_invalid_format_exits(tmp_path):
+    """Invalid SMELLCHECK_FORMAT from env var should produce clear error."""
+    p = _write_py(tmp_path, "x = 1")
+    result = _run_cli(str(p), env={"SMELLCHECK_FORMAT": "xml"})
+    assert result.returncode == 1
+    assert "Error:" in result.stderr
+    assert "text" in result.stderr or "json" in result.stderr  # lists valid formats
+
+
+def test_env_var_invalid_severity_exits(tmp_path):
+    """Invalid SMELLCHECK_MIN_SEVERITY from env var should produce clear error."""
+    p = _write_py(tmp_path, "x = 1")
+    result = _run_cli(str(p), env={"SMELLCHECK_MIN_SEVERITY": "critical"})
+    assert result.returncode == 1
+    assert "Error:" in result.stderr
+
+
+def test_env_var_cli_overrides_env_format(tmp_path):
+    """CLI --format should override SMELLCHECK_FORMAT env var."""
+    p = _write_py(tmp_path, "def f(x=[]):\n    pass")  # triggers SC701 (error severity)
+    result = _run_cli(str(p), "--format", "json", env={"SMELLCHECK_FORMAT": "text"})
+    # returncode may be 1 due to findings; what matters is stdout is valid JSON
+    import json
+    data = json.loads(result.stdout)  # must be valid JSON, proving CLI --format won
+    assert isinstance(data, list)
