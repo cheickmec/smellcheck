@@ -159,7 +159,7 @@ from mypackage.core import Foo as PublicFoo  # explicit public API
 __all__ = ["PublicFoo"]  # signal intent
 ```
 
-**Detection:** File has ≥ 5 top-level statements, only import statements, and no non-import assignments, function/class definitions, or executable logic. `__init__.py` files are excluded (they are expected to re-export). Modules with `__all__` use a lower detection threshold (import ratio > 0.8) since `__all__` is a stronger re-export signal; without `__all__`, the threshold is stricter (> 0.9). Modules with constant assignments or type aliases are excluded.
+**Detection:** File has ≥ 5 top-level statements consisting mostly of imports, with no function/class definitions and no meaningful assignments (constants, type aliases). An optional `__all__` declaration and module docstring are permitted. `__init__.py` files are excluded. Modules with `__all__` use a lower detection threshold (import ratio > 0.8) since `__all__` signals intentional re-export; without `__all__`, the threshold is stricter (> 0.9).
 
 **SC code:** SC509  |  **Severity:** info  |  **Scope:** cross\_file
 
