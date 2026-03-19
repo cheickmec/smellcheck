@@ -3465,17 +3465,38 @@ from core.utils import helper2
 
 
 def test_sc509_future_import_not_counted(tmp_path):
-    """SC509: from __future__ import should not inflate import ratio."""
+    """SC509: __future__ imports should not inflate import ratio or statement count."""
+    # 2 __future__ imports + 4 real imports + __all__ = would be 7 stmts if __future__ counted
+    # With __future__ excluded: 4 imports + __all__ = 5 stmts, ratio = 4/5 = 0.8, threshold 0.8 with __all__
+    # This should NOT fire because ratio is <= 0.8 (not strictly greater)
     p = _write_py(tmp_path, '''
 from __future__ import annotations
 from __future__ import division
-DEFAULT = 42
-TIMEOUT = 30
-RETRIES = 3
-from core import helper
-''', name="mixed.py")
+__all__ = ["User", "Order", "Product", "helper"]
+from core.models import User
+from core.models import Order
+from core.models import Product
+from core.utils import helper
+''', name="shim.py")
     findings = scan_path(p)
     assert not any(f.pattern == "SC509" for f in findings)
+
+
+def test_sc509_fires_with_future_import_present(tmp_path):
+    """SC509: should still detect lazy modules that happen to have __future__ imports."""
+    # 1 __future__ + 6 real imports = 7 stmts if __future__ counted (ratio 6/7=0.857)
+    # With __future__ excluded: 6 imports = 6 stmts, ratio 6/6=1.0 > 0.9 -> fires
+    p = _write_py(tmp_path, '''
+from __future__ import annotations
+from core.models import User
+from core.models import Order
+from core.models import Product
+from core.utils import helper1
+from core.utils import helper2
+from core.utils import helper3
+''', name="shim.py")
+    findings = scan_path(p)
+    assert any(f.pattern == "SC509" for f in findings)
 
 
 def test_sc509_module_with_constants_excluded(tmp_path):

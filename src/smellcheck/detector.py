@@ -3304,6 +3304,12 @@ def scan_file(
         and isinstance(_body[0].value.value, str)
     ):
         _body = _body[1:]
+    # Also exclude __future__ imports from the denominator so they don't
+    # artificially lower the import ratio for SC509.
+    _body = [
+        node for node in _body
+        if not (isinstance(node, ast.ImportFrom) and node.module == "__future__")
+    ]
     detector.file_data.total_statements = len(_body)
     func_count = 0
     cls_count = 0
@@ -3336,6 +3342,10 @@ def scan_file(
                 has_all = True
             else:
                 non_import_assign += 1
+        elif isinstance(node, ast.AugAssign):
+            non_import_assign += 1
+        elif hasattr(ast, "TypeAlias") and isinstance(node, ast.TypeAlias):
+            non_import_assign += 1
     detector.file_data.function_def_count = func_count
     detector.file_data.class_def_count = cls_count
     detector.file_data.import_statement_count = import_count
