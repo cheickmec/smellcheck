@@ -3316,6 +3316,9 @@ def scan_file(
         elif isinstance(node, ast.ClassDef):
             cls_count += 1
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            # Exclude `from __future__` imports — they aren't re-exports
+            if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+                continue
             import_count += 1
         elif isinstance(node, ast.Assign):
             is_all = any(

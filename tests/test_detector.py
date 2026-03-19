@@ -3464,6 +3464,20 @@ from core.utils import helper2
     assert any(f.pattern == "SC509" for f in findings)
 
 
+def test_sc509_future_import_not_counted(tmp_path):
+    """SC509: from __future__ import should not inflate import ratio."""
+    p = _write_py(tmp_path, '''
+from __future__ import annotations
+from __future__ import division
+DEFAULT = 42
+TIMEOUT = 30
+RETRIES = 3
+from core import helper
+''', name="mixed.py")
+    findings = scan_path(p)
+    assert not any(f.pattern == "SC509" for f in findings)
+
+
 def test_sc509_module_with_constants_excluded(tmp_path):
     """SC509: module with constant assignments is not a lazy re-export.
 
