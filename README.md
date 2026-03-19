@@ -127,7 +127,17 @@ cache = true                           # enable file-level caching (default: tru
 cache-dir = ".smellcheck-cache"        # cache directory (default: .smellcheck-cache)
 ```
 
-CLI flags override config values.
+CLI flags override config values. **Precedence:** CLI flags > environment variables > pyproject.toml > defaults.
+
+### Environment variables
+
+Set `SMELLCHECK_*` variables for CI/CD without per-repo config files:
+
+```bash
+SMELLCHECK_FAIL_ON=warning SMELLCHECK_FORMAT=json smellcheck src/
+```
+
+Supported: `SMELLCHECK_MIN_SEVERITY`, `SMELLCHECK_FAIL_ON`, `SMELLCHECK_FORMAT`, `SMELLCHECK_SELECT`, `SMELLCHECK_IGNORE`, `SMELLCHECK_BASELINE`. See the [Configuration Reference](https://github.com/cheickmec/smellcheck/blob/main/docs/configuration.md) for details.
 
 ### Config inheritance (`extends`)
 
