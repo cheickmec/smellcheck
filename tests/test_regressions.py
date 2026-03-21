@@ -226,3 +226,161 @@ def test_cross_file_duplicate_stem_not_dropped(tmp_path):
     assert str(pkg2 / "utils.py") in module_map, "pkg2/utils.py missing from module_map"
     # scan_paths must not crash and must return without dropping either file.
     _ = scan_paths([pkg1 / "utils.py", pkg2 / "utils.py"])
+
+
+# --- Regression #74: ast.walk traverses nested functions ---
+
+def test_nested_function_not_attributed_to_outer(tmp_path):
+    """Smells inside a nested function must not be reported against the outer function.
+
+    Before the fix, ``ast.walk()`` descended into nested scopes, so a
+    magic number in ``inner()`` would be blamed on ``outer()``.
+    """
+    p = _write_py(tmp_path, """\
+        def outer(x):
+            x + 1
+
+            def inner():
+                return 99999
+    """)
+    findings = scan_path(p)
+    # SC601 (magic number) should fire for inner(), NOT for outer()
+    magic = [f for f in findings if f.pattern == "SC601"]
+    for f in magic:
+        assert "inner" not in f.message or "outer" not in f.message, (
+            f"SC601 should not attribute inner()'s magic number to outer(): {f.message}"
+        )
+
+
+def test_nested_function_generic_name_not_attributed_to_outer(tmp_path):
+    """SC202 generic-name findings from a nested function must not appear on the outer.
+
+    Before the fix, ``ast.walk()`` descended into nested scopes, so a
+    generic assignment in ``inner()`` would be reported against ``outer()``.
+    """
+    p = _write_py(tmp_path, """\
+        def outer():
+            x = 1
+
+            def inner():
+                result = compute()
+                return result
+    """)
+    findings = scan_path(p)
+    generic = [f for f in findings if f.pattern == "SC202"]
+    outer_generic = [f for f in generic if "outer" in f.message]
+    assert not outer_generic, (
+        f"SC202 should not blame outer() for generic names inside inner(): {outer_generic}"
+    )
+
+
+def test_cyclomatic_complexity_ignores_nested(tmp_path):
+    """CC of the outer function should not include branches in nested functions."""
+    # Outer has CC=1 (no branches), inner has many branches.
+    p = _write_py(tmp_path, """\
+        def outer():
+            def inner(x):
+                if x > 0:
+                    pass
+                if x > 1:
+                    pass
+                if x > 2:
+                    pass
+                if x > 3:
+                    pass
+                if x > 4:
+                    pass
+                if x > 5:
+                    pass
+                if x > 6:
+                    pass
+                if x > 7:
+                    pass
+                if x > 8:
+                    pass
+                if x > 9:
+                    pass
+                if x > 10:
+                    pass
+            return inner
+    """)
+    findings = scan_path(p)
+    # SC210 should fire for inner() but NOT for outer()
+    cc_findings = [f for f in findings if f.pattern == "SC210"]
+    outer_cc = [f for f in cc_findings if "outer" in f.message]
+    assert not outer_cc, (
+        f"SC210 should not fire for outer() due to inner()'s branches: {outer_cc}"
+    )
+
+
+def test_nesting_depth_ignores_nested_functions(tmp_path):
+    """Nesting depth should not count control flow inside nested functions."""
+    p = _write_py(tmp_path, """\
+        def outer():
+            def inner():
+                for i in range(10):
+                    for j in range(10):
+                        for k in range(10):
+                            for m in range(10):
+                                for n in range(10):
+                                    pass
+            return inner
+    """)
+    findings = scan_path(p)
+    # SC201 (deep nesting) should fire for inner() but NOT for outer()
+    nesting = [f for f in findings if f.pattern == "SC201"]
+    outer_nesting = [f for f in nesting if "outer" in f.message]
+    assert not outer_nesting, (
+        f"SC201 should not fire for outer() due to inner()'s nesting: {outer_nesting}"
+    )
+
+
+# --- Regression #78: _is_elif broken at module level ---
+
+def test_is_elif_module_level(tmp_path):
+    """Module-level if/elif chains should not duplicate findings.
+
+    Before the fix, ``_is_elif`` returned False when ``_func_stack`` was
+    empty, so an elif at module level was treated as a top-level if,
+    producing duplicate SC302/SC407 findings.
+    """
+    p = _write_py(tmp_path, """\
+        x = 1
+        if isinstance(x, int):
+            pass
+        elif isinstance(x, str):
+            pass
+        elif isinstance(x, float):
+            pass
+    """)
+    findings = scan_path(p)
+    # SC302 should fire at most once for the chain, not once per elif
+    isinstance_chain = [f for f in findings if f.pattern == "SC302"]
+    assert len(isinstance_chain) <= 1, (
+        f"SC302 should fire at most once for an if/elif chain, got {len(isinstance_chain)}: "
+        f"{isinstance_chain}"
+    )
+
+
+# --- Regression #79: missing ast.TryStar ---
+
+def test_dead_code_after_return_in_try_star(tmp_path):
+    """SC401 should detect dead code inside ``try/except*`` blocks (Python 3.11+)."""
+    import sys
+    if sys.version_info < (3, 11):
+        pytest.skip("ast.TryStar requires Python 3.11+")
+    # Use exec to avoid SyntaxError on Python < 3.11
+    code = (
+        "def foo():\n"
+        "    try:\n"
+        "        pass\n"
+        "    except* ValueError:\n"
+        "        return 1\n"
+        "        print('dead')\n"
+    )
+    p = _write_py(tmp_path, code)
+    findings = scan_path(p)
+    dead = [f for f in findings if f.pattern == "SC401"]
+    assert any("dead" in f.message.lower() or "unreachable" in f.message.lower() for f in dead), (
+        f"SC401 should detect dead code after return inside except* block, got: {dead}"
+    )
