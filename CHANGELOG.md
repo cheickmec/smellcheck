@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.9](https://github.com/cheickmec/smellcheck/compare/v0.3.8...v0.3.9) (2026-03-21)
+
+
+### Features
+
+* add --explain examples for SC801-SC805 metric rules ([942cda2](https://github.com/cheickmec/smellcheck/commit/942cda276cec1481f3b03c27ba6a9eb3b76980b9))
+* add SC509 Lazy Re-export Module detection ([5d709a8](https://github.com/cheickmec/smellcheck/commit/5d709a850f53f164bf0932f1136e4411441dceaa))
+* add SMELLCHECK_* environment variable configuration ([fca1a2f](https://github.com/cheickmec/smellcheck/commit/fca1a2f3514e628eb937ae45eb20426ae034418d))
+
+
+### Bug Fixes
+
+* add TryStar to nesting depth, hoist compound types, fix test SC code filter ([9a408c3](https://github.com/cheickmec/smellcheck/commit/9a408c3f7a7a3402a8d376d488b98eb8f9da7d99))
+* address code review findings for batch2 PR ([e34afb0](https://github.com/cheickmec/smellcheck/commit/e34afb00944c19bf2944b570a34f48da9d5cada4))
+* address Copilot review findings for PR [#71](https://github.com/cheickmec/smellcheck/issues/71) ([0aad8f7](https://github.com/cheickmec/smellcheck/commit/0aad8f7aef1fecaf0a77dd335b4cd754ab064396))
+* address Copilot review findings for PR [#72](https://github.com/cheickmec/smellcheck/issues/72) ([37c3499](https://github.com/cheickmec/smellcheck/commit/37c3499cca0fd83069922ea040b2b9a08dc2c998))
+* address Copilot round 2 review findings for PR [#71](https://github.com/cheickmec/smellcheck/issues/71) ([3074c2c](https://github.com/cheickmec/smellcheck/commit/3074c2ce568ab042afa45123622d26c5923612ae))
+* address Copilot round 2 review findings for PR [#72](https://github.com/cheickmec/smellcheck/issues/72) ([9662e20](https://github.com/cheickmec/smellcheck/commit/9662e208c59a1149ae2f92182b72e205890fc9e9))
+* address Copilot round 4 review findings ([d44fa42](https://github.com/cheickmec/smellcheck/commit/d44fa420cabea5d1aad04414f0df73ffd27de236))
+* address Copilot round 5 review findings ([aa413e4](https://github.com/cheickmec/smellcheck/commit/aa413e40cf05094d60824e633690962a46e10dc5))
+* address Copilot round 6 review findings ([7bf1206](https://github.com/cheickmec/smellcheck/commit/7bf1206dbbee3c07137fbb23519c807324b72abe))
+* align category with registry, dynamic phase order, escape github output, validate baseline ([159ff95](https://github.com/cheickmec/smellcheck/commit/159ff95ae5430725dca329ee11869dab21f83d80))
+* clean up test assertions and fix docstring in cross-file helpers ([befc183](https://github.com/cheickmec/smellcheck/commit/befc1836024ac8084c5ca8b704e6ee4cde93b9af))
+* correct Plan JSON schema type and clarify metric examples ([c1e90e6](https://github.com/cheickmec/smellcheck/commit/c1e90e63d022078a2c86841a753a41c28e06d8c1))
+* correct registry count to 56 (SC509 is on batch2 branch) ([294fb6b](https://github.com/cheickmec/smellcheck/commit/294fb6b9225bd4709eedb8d5651e0493729ba379))
+* correct rule registry count assertion to 56 ([84e02eb](https://github.com/cheickmec/smellcheck/commit/84e02eb8333214d5c373c96ba59270592bd09790))
+* correct SC509 __future__ denominator bug and strengthen tests ([528f3ae](https://github.com/cheickmec/smellcheck/commit/528f3aeebfd6ad533ba53a85625d2ebc4d566eb3))
+* deduplicate cyclic import findings and handle duplicate Path.stem ([c9d69dc](https://github.com/cheickmec/smellcheck/commit/c9d69dc3579e9ab4a57b6aa19ec1ee7f7cc5d4cd))
+* exclude __future__ imports from SC509 import count ([702a610](https://github.com/cheickmec/smellcheck/commit/702a61093d0dfa1138f945e91294b514f9343bb8))
+* harden baseline validation, escape commas in github format, strengthen test ([2e93239](https://github.com/cheickmec/smellcheck/commit/2e932395c4ad503d4fa677c3f74d51ce715dced6))
+* hoist _NESTING_COMPOUND to module level to avoid per-iteration rebuild ([54b9c08](https://github.com/cheickmec/smellcheck/commit/54b9c081e7ad89ed41e2748469a97a842ce4ac5e))
+* lower coverage threshold to 80% and exclude repo doc links from lychee ([68f2166](https://github.com/cheickmec/smellcheck/commit/68f216645f3ce262439b17ed67d86a393118dcee))
+* skip empty list from comma-only SMELLCHECK_SELECT/IGNORE values ([5da31ca](https://github.com/cheickmec/smellcheck/commit/5da31cad5c3c6612c8f66fe4be2b0df082fad4e9))
+* stop ast.walk into nested scopes, fix _is_elif module level, add TryStar ([bb0de30](https://github.com/cheickmec/smellcheck/commit/bb0de30a1728d44a08fb9c1e454805388b56647c))
+* update config docs precedence text and file path description ([0bffaf6](https://github.com/cheickmec/smellcheck/commit/0bffaf6aecb71be14db4d92cba46c76b06ff9e4e))
+* update pyproject.toml description from 56 to 57 AST checks ([6317b9c](https://github.com/cheickmec/smellcheck/commit/6317b9c5ba3911e4495bc55a687112c5f8427f87))
+* update scan_paths comment to reflect lazy module detection ([4bc6abb](https://github.com/cheickmec/smellcheck/commit/4bc6abb0d0b59b63bbf61e2f62eb245b7c86c715))
+* use qualified imports in test, strengthen assertion, add backticks to SC503 message ([47be03c](https://github.com/cheickmec/smellcheck/commit/47be03c81ca81b9d919cb0eb7c29db55f0ec96f7))
+
+
+### Documentation
+
+* add Analysis Tiers section explaining per-file, cross-file, and OO metric passes ([5593fe4](https://github.com/cheickmec/smellcheck/commit/5593fe4f14485155aaf27c04f2fdb7bf1de845d6))
+* add configuration schema documentation ([78d0dd3](https://github.com/cheickmec/smellcheck/commit/78d0dd3cc4cee122128185396c86e89f0327208b))
+* add environment variable section to README ([07b1ed4](https://github.com/cheickmec/smellcheck/commit/07b1ed4b1fd3c8cab66a6ceecc28e48fcbcf7497))
+* add OO metrics interpretation guide with thresholds and examples ([ec8890d](https://github.com/cheickmec/smellcheck/commit/ec8890d7a7b45f4a92bd1eb6c36e1efb357053b1))
+* align test comment with assertion (at most -&gt; exactly once) ([a30608b](https://github.com/cheickmec/smellcheck/commit/a30608bb15a7a3834221f1f274b4013848800263))
+* fix misleading TOML example in config inheritance section ([8e39ce3](https://github.com/cheickmec/smellcheck/commit/8e39ce319e389d57745c5920cf8e263f3c3cdd59))
+* fix SC509 architecture.md example and detection description ([17c5505](https://github.com/cheickmec/smellcheck/commit/17c55051d5b7ee7dfd84757ad8c3070c345c7548))
+* reword SC509 detection description to match actual heuristic ([1ba13d7](https://github.com/cheickmec/smellcheck/commit/1ba13d7948bbf475ccf53484456e10faaf7e0dc4))
+
+
+### Miscellaneous
+
+* add code coverage reporting with Codecov and README badge ([d7a574d](https://github.com/cheickmec/smellcheck/commit/d7a574d21f17e767f59e4c88734030021d6a797c))
+* add mypy type checking to CI ([6b618cb](https://github.com/cheickmec/smellcheck/commit/6b618cbcda551e39927b32818134abade013be47))
+
 ## [0.3.8](https://github.com/cheickmec/smellcheck/compare/v0.3.7...v0.3.8) (2026-02-21)
 
 
