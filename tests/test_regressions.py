@@ -173,3 +173,58 @@ def test_noqa_code_case_insensitive(tmp_path):
     patterns = [f.pattern for f in findings]
     # _is_suppressed uppercases codes, so sc701 -> SC701 should match
     assert "SC701" not in patterns
+
+
+# --- Regression: 3-node cyclic import produces exactly 1 finding (#75) ---
+
+def test_cyclic_import_three_node_single_finding(tmp_path):
+    """A single A->B->C->A cycle must produce exactly 1 SC503 finding, not 3."""
+    (tmp_path / "mod_a.py").write_text("import mod_b\n", encoding="utf-8")
+    (tmp_path / "mod_b.py").write_text("import mod_c\n", encoding="utf-8")
+    (tmp_path / "mod_c.py").write_text("import mod_a\n", encoding="utf-8")
+    findings = scan_paths([
+        tmp_path / "mod_a.py",
+        tmp_path / "mod_b.py",
+        tmp_path / "mod_c.py",
+    ])
+    sc503 = [f for f in findings if f.pattern == "SC503"]
+    assert len(sc503) == 1, f"Expected 1 SC503 finding, got {len(sc503)}: {sc503}"
+
+
+# --- Regression: duplicate Path.stem does not drop files (#76) ---
+
+def test_cross_file_duplicate_stem_not_dropped(tmp_path):
+    """Two files with the same stem in different packages must both be analyzed."""
+    pkg1 = tmp_path / "pkg1"
+    pkg2 = tmp_path / "pkg2"
+    pkg1.mkdir()
+    pkg2.mkdir()
+    # pkg1/utils.py imports pkg2's utils (via stem "utils")
+    (pkg1 / "utils.py").write_text(
+        "import utils\ndef helper1(): pass\n", encoding="utf-8"
+    )
+    # pkg2/utils.py imports pkg1's utils (via stem "utils")
+    (pkg2 / "utils.py").write_text(
+        "import utils\ndef helper2(): pass\n", encoding="utf-8"
+    )
+    findings = scan_paths([pkg1 / "utils.py", pkg2 / "utils.py"])
+    # Both files must appear in findings metadata -- neither should be dropped.
+    # Collect all filepaths referenced in any finding.
+    all_files_in_findings = {f.file for f in findings}
+    # Also verify scan_paths processed both files by checking that per-file
+    # checks ran on each (e.g. both files exist in the scan, even if no
+    # cross-file finding fires).  The key invariant: scanning 2 files must
+    # not silently reduce to 1.
+    from smellcheck.detector import scan_file
+    fd1 = scan_file(pkg1 / "utils.py")
+    fd2 = scan_file(pkg2 / "utils.py")
+    assert fd1 is not None and fd2 is not None, "Both files must be scannable"
+    # Verify the module map doesn't collapse them: import the helper directly
+    from smellcheck.detector import _build_module_maps, FileData
+    all_data = [fd1[1], fd2[1]]
+    module_map, reverse_map = _build_module_maps(all_data)
+    # Each file must have a distinct module name
+    modules = list(module_map.values())
+    assert len(modules) == len(set(modules)), (
+        f"Module map collapsed duplicate stems: {module_map}"
+    )
