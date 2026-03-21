@@ -307,7 +307,9 @@ def test_cyclomatic_complexity_ignores_nested(tmp_path):
     findings = scan_path(p)
     # SC210 should fire for inner() but NOT for outer()
     cc_findings = [f for f in findings if f.pattern == "SC210"]
+    inner_cc = [f for f in cc_findings if "inner" in f.message]
     outer_cc = [f for f in cc_findings if "outer" in f.message]
+    assert inner_cc, "SC210 should fire for inner() which has high CC"
     assert not outer_cc, (
         f"SC210 should not fire for outer() due to inner()'s branches: {outer_cc}"
     )
@@ -329,7 +331,9 @@ def test_nesting_depth_ignores_nested_functions(tmp_path):
     findings = scan_path(p)
     # SC402 (deep nesting) should fire for inner() but NOT for outer()
     nesting = [f for f in findings if f.pattern == "SC402"]
+    inner_nesting = [f for f in nesting if "inner" in f.message]
     outer_nesting = [f for f in nesting if "outer" in f.message]
+    assert inner_nesting, "SC402 should fire for inner() which has deep nesting"
     assert not outer_nesting, (
         f"SC402 should not fire for outer() due to inner()'s nesting: {outer_nesting}"
     )
@@ -356,8 +360,8 @@ def test_is_elif_module_level(tmp_path):
     findings = scan_path(p)
     # SC302 should fire at most once for the chain, not once per elif
     isinstance_chain = [f for f in findings if f.pattern == "SC302"]
-    assert len(isinstance_chain) <= 1, (
-        f"SC302 should fire at most once for an if/elif chain, got {len(isinstance_chain)}: "
+    assert len(isinstance_chain) == 1, (
+        f"SC302 should fire exactly once for an if/elif isinstance chain, got {len(isinstance_chain)}: "
         f"{isinstance_chain}"
     )
 
