@@ -408,8 +408,8 @@ def test_cli_help():
 
 
 def test_rule_registry_complete():
-    """Registry has 57 entries with valid families and scopes."""
-    assert len(_RULE_REGISTRY) == 57
+    """Registry has 60 entries with valid families and scopes."""
+    assert len(_RULE_REGISTRY) == 60
     for key, rd in _RULE_REGISTRY.items():
         assert key.startswith("SC"), f"Key {key!r} must start with 'SC'"
         assert key == rd.rule_id, f"Key {key!r} must match rule_id {rd.rule_id!r}"
@@ -810,6 +810,265 @@ def test_offloaded_and_standalone_blocking_call(tmp_path):
     blocking = [f for f in findings if f.pattern == "SC703"]
     assert len(blocking) == 1
     assert "time.sleep" in blocking[0].message
+
+
+
+
+# ---------------------------------------------------------------------------
+# SC704: Sync I/O imports in async modules
+# ---------------------------------------------------------------------------
+
+
+def test_sc704_sync_import_in_async_module(tmp_path):
+    """Flag top-level sync I/O import in a module with async functions."""
+    p = _write_py(
+        tmp_path,
+        """\
+        import requests
+        async def fetch(url):
+            return requests.get(url)
+    """,
+    )
+    findings = scan_path(p)
+    sc704 = [f for f in findings if f.pattern == "SC704"]
+    assert len(sc704) == 1
+    assert "requests" in sc704[0].message
+    assert sc704[0].severity == "warning"
+
+
+def test_sc704_no_flag_without_async(tmp_path):
+    """No flag when the module has no async functions."""
+    p = _write_py(
+        tmp_path,
+        """\
+        import requests
+        def fetch(url):
+            return requests.get(url)
+    """,
+    )
+    findings = scan_path(p)
+    sc704 = [f for f in findings if f.pattern == "SC704"]
+    assert sc704 == []
+
+
+def test_sc704_no_flag_scoped_import(tmp_path):
+    """No flag when sync library is imported inside a function body."""
+    p = _write_py(
+        tmp_path,
+        """\
+        async def fetch(url):
+            import requests
+            return requests.get(url)
+    """,
+    )
+    findings = scan_path(p)
+    sc704 = [f for f in findings if f.pattern == "SC704"]
+    assert sc704 == []
+
+
+def test_sc704_from_import(tmp_path):
+    """Flag from urllib.request import urlopen in async module."""
+    p = _write_py(
+        tmp_path,
+        """\
+        from urllib.request import urlopen
+        async def fetch(url):
+            return urlopen(url)
+    """,
+    )
+    findings = scan_path(p)
+    sc704 = [f for f in findings if f.pattern == "SC704"]
+    assert len(sc704) == 1
+    assert "urllib.request" in sc704[0].message
+
+
+def test_sc704_multiple_sync_imports(tmp_path):
+    """Flag each top-level sync I/O import separately."""
+    p = _write_py(
+        tmp_path,
+        """\
+        import requests
+        import smtplib
+        async def handler():
+            pass
+    """,
+    )
+    findings = scan_path(p)
+    sc704 = [f for f in findings if f.pattern == "SC704"]
+    assert len(sc704) == 2
+
+
+def test_sc704_async_method_in_class(tmp_path):
+    """Flag when async def is inside a class."""
+    p = _write_py(
+        tmp_path,
+        """\
+        import requests
+        class Service:
+            async def fetch(self, url):
+                return requests.get(url)
+    """,
+    )
+    findings = scan_path(p)
+    sc704 = [f for f in findings if f.pattern == "SC704"]
+    assert len(sc704) == 1
+
+
+# ---------------------------------------------------------------------------
+# SC705: asyncio.to_thread tech debt hint
+# ---------------------------------------------------------------------------
+
+
+def test_sc705_to_thread_time_sleep(tmp_path):
+    """Hint when to_thread wraps time.sleep (has asyncio.sleep alternative)."""
+    p = _write_py(
+        tmp_path,
+        """\
+        import asyncio
+        import time
+        async def handler():
+            await asyncio.to_thread(time.sleep, 1)
+    """,
+    )
+    findings = scan_path(p)
+    sc705 = [f for f in findings if f.pattern == "SC705"]
+    assert len(sc705) == 1
+    assert "asyncio.sleep()" in sc705[0].message
+    assert sc705[0].severity == "info"
+
+
+def test_sc705_to_thread_requests(tmp_path):
+    """Hint when to_thread wraps requests.get (has httpx alternative)."""
+    p = _write_py(
+        tmp_path,
+        """\
+        import asyncio
+        import requests
+        async def fetch():
+            await asyncio.to_thread(requests.get, "http://example.com")
+    """,
+    )
+    findings = scan_path(p)
+    sc705 = [f for f in findings if f.pattern == "SC705"]
+    assert len(sc705) == 1
+    assert "httpx.AsyncClient" in sc705[0].message
+
+
+def test_sc705_to_thread_open(tmp_path):
+    """Hint when to_thread wraps open (has aiofiles alternative)."""
+    p = _write_py(
+        tmp_path,
+        """\
+        import asyncio
+        async def read_file():
+            await asyncio.to_thread(open, "data.txt")
+    """,
+    )
+    findings = scan_path(p)
+    sc705 = [f for f in findings if f.pattern == "SC705"]
+    assert len(sc705) == 1
+    assert "aiofiles.open()" in sc705[0].message
+
+
+def test_sc705_to_thread_subprocess(tmp_path):
+    """Hint when to_thread wraps subprocess.run (has asyncio alternative)."""
+    p = _write_py(
+        tmp_path,
+        """\
+        import asyncio
+        import subprocess
+        async def run_cmd():
+            await asyncio.to_thread(subprocess.run, ["ls"])
+    """,
+    )
+    findings = scan_path(p)
+    sc705 = [f for f in findings if f.pattern == "SC705"]
+    assert len(sc705) == 1
+    assert "asyncio.create_subprocess_exec()" in sc705[0].message
+
+
+def test_sc705_no_hint_for_os_walk(tmp_path):
+    """No hint when to_thread wraps os.walk (alternative is asyncio.to_thread itself)."""
+    p = _write_py(
+        tmp_path,
+        """\
+        import asyncio
+        import os
+        async def list_files():
+            await asyncio.to_thread(os.walk, "/tmp")
+    """,
+    )
+    findings = scan_path(p)
+    sc705 = [f for f in findings if f.pattern == "SC705"]
+    assert sc705 == []
+
+
+# ---------------------------------------------------------------------------
+# SC706: Conflicting concurrency libraries
+# ---------------------------------------------------------------------------
+
+
+def test_sc706_requirements_txt_conflict(tmp_path):
+    """Flag conflicting libs in requirements.txt."""
+    req = tmp_path / "requirements.txt"
+    req.write_text("gevent>=1.0\nuvicorn\naiohttp\n", encoding="utf-8")
+    _write_py(tmp_path, "x = 1\n")
+    findings = scan_path(tmp_path)
+    sc706 = [f for f in findings if f.pattern == "SC706"]
+    assert len(sc706) >= 2  # gevent+uvicorn, gevent+aiohttp
+    msgs = " ".join(f.message for f in sc706)
+    assert "gevent" in msgs
+    assert "uvicorn" in msgs or "aiohttp" in msgs
+
+
+def test_sc706_pyproject_toml_conflict(tmp_path):
+    """Flag conflicting libs in pyproject.toml."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\ndependencies = ["eventlet", "httpx>=0.24"]\n',
+        encoding="utf-8",
+    )
+    _write_py(tmp_path, "x = 1\n")
+    findings = scan_path(tmp_path)
+    sc706 = [f for f in findings if f.pattern == "SC706"]
+    assert len(sc706) == 1
+    assert "eventlet" in sc706[0].message
+    assert "httpx" in sc706[0].message
+
+
+def test_sc706_setup_cfg_conflict(tmp_path):
+    """Flag conflicting libs in setup.cfg."""
+    setup_cfg = tmp_path / "setup.cfg"
+    setup_cfg.write_text(
+        "[options]\ninstall_requires =\n    gevent\n    trio\n",
+        encoding="utf-8",
+    )
+    _write_py(tmp_path, "x = 1\n")
+    findings = scan_path(tmp_path)
+    sc706 = [f for f in findings if f.pattern == "SC706"]
+    assert len(sc706) == 1
+    assert "gevent" in sc706[0].message
+    assert "trio" in sc706[0].message
+
+
+def test_sc706_no_flag_async_only(tmp_path):
+    """No flag when only asyncio-based libs present."""
+    req = tmp_path / "requirements.txt"
+    req.write_text("uvicorn\naiohttp\nhttpx\n", encoding="utf-8")
+    _write_py(tmp_path, "x = 1\n")
+    findings = scan_path(tmp_path)
+    sc706 = [f for f in findings if f.pattern == "SC706"]
+    assert sc706 == []
+
+
+def test_sc706_no_flag_sync_only(tmp_path):
+    """No flag when only monkey-patching libs present (no conflict)."""
+    req = tmp_path / "requirements.txt"
+    req.write_text("gevent\neventlet\n", encoding="utf-8")
+    _write_py(tmp_path, "x = 1\n")
+    findings = scan_path(tmp_path)
+    sc706 = [f for f in findings if f.pattern == "SC706"]
+    assert sc706 == []
 
 
 # ---------------------------------------------------------------------------

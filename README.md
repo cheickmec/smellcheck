@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Python Code Smell Detector & Refactoring Guide</strong><br>
-  83 refactoring patterns &middot; 57 automated AST checks &middot; zero dependencies
+  83 refactoring patterns &middot; 60 automated AST checks &middot; zero dependencies
 </p>
 
 <p align="center">
@@ -301,7 +301,7 @@ cache-dir = ".smellcheck-cache"  # custom cache directory
 
 ## Features
 
-- **57 automated smell checks** -- per-file AST analysis, cross-file dependency analysis, and OO metrics
+- **60 automated smell checks** -- per-file AST analysis, cross-file dependency analysis, and OO metrics
 - **83 refactoring patterns** -- numbered catalog with before/after examples, trade-offs, and severity levels
 - **Zero dependencies** -- stdlib-only, runs on any Python 3.10+ installation
 - **Multiple output formats** -- text (terminal), JSON (machine-readable), GitHub annotations (CI), SARIF 2.1.0 (Code Scanning), JUnit XML (Jenkins/GitLab/CircleCI), GitLab CodeClimate (MR quality widget)
@@ -314,7 +314,7 @@ cache-dir = ".smellcheck-cache"  # custom cache directory
 
 Every rule is identified by an **SC code** (e.g. `SC701`). Use SC codes in `--select`, `--ignore`, and `# noqa` comments.
 
-### Per-File (41 checks)
+### Per-File (43 checks)
 
 | SC Code | Pattern | Severity |
 |---------|---------|----------|
@@ -359,8 +359,10 @@ Every rule is identified by an **SC code** (e.g. `SC701`). Use SC codes in `--se
 | SC701 | Mutable default arguments | error |
 | SC702 | open() without context manager | warning |
 | SC703 | Blocking calls in async functions | warning |
+| SC704 | Sync I/O imports in async module | warning |
+| SC705 | asyncio.to_thread tech debt hint | info |
 
-### Cross-File (11 checks)
+### Cross-File (12 checks)
 
 | SC Code | Pattern | Description |
 |---------|---------|-------------|
@@ -375,6 +377,7 @@ Every rule is identified by an **SC code** (e.g. `SC701`). Use SC codes in `--se
 | SC508 | Unstable dependency | Stable module depends on unstable module |
 | SC509 | Lazy re-export module | Module only re-exports imported symbols with no logic |
 | SC606 | Duplicate functions | AST-normalized hashing across files |
+| SC706 | Conflicting concurrency libraries | Monkey-patching libs coexist with asyncio-based libs |
 
 ### OO Metrics (5 checks)
 
@@ -412,14 +415,14 @@ Each pattern includes a description, before/after code examples, and trade-offs:
 | [`control.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/control.md) | Guards, pipelines, conditionals, phases (SC401–SC407) |
 | [`architecture.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/architecture.md) | DI, singletons, exceptions, delegates (SC501–SC509) |
 | [`hygiene.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/hygiene.md) | Constants, dead code, comments, style (SC601–SC606) |
-| [`idioms.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/idioms.md) | Context managers, generators, unpacking, async (SC701–SC703) |
+| [`idioms.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/idioms.md) | Context managers, generators, unpacking, async (SC701–SC706) |
 | [`metrics.md`](https://github.com/cheickmec/smellcheck/blob/main/plugins/python-refactoring/skills/python-refactoring/references/metrics.md) | OO metrics: cohesion, coupling, fan-out, response, delegation (SC801–SC805) |
 
 ## How It Compares
 
 | Feature | smellcheck | [PyExamine](https://github.com/KarthikShivasankar/python_smells_detector) | [SMART-Dal](https://github.com/SMART-Dal/smell-detector-python) | [Pyscent](https://github.com/whyjay17/Pyscent) |
 |---------|------------|-----------|-----------|---------|
-| Automated detections | 57 | 49 | 31 | 11 |
+| Automated detections | 60 | 49 | 31 | 11 |
 | Refactoring guidance | 83 patterns | None | None | None |
 | Dependencies | 0 (stdlib) | pylint, radon | DesigniteJava | pylint, radon, cohesion |
 | Python-specific idioms | Yes | No | No | No |

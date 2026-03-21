@@ -3,7 +3,7 @@
 Python Code Smell Detector — SC-coded rules organized by family.
 
 Self-contained: stdlib only (ast, pathlib, sys, json, collections, re, textwrap).
-Detects 57 patterns programmatically (41 per-file + 11 cross-file + 5 OO metrics).
+Detects 60 patterns programmatically (43 per-file + 12 cross-file + 5 OO metrics).
 
 Usage:
     smellcheck path/to/file_or_dir [--format json] [--min-severity info]
@@ -121,6 +121,9 @@ _RULE_REGISTRY: dict[str, RuleDef] = {
     "SC701": RuleDef("SC701", "Replace Mutable Default Arguments", "idioms", "file", "error"),
     "SC702": RuleDef("SC702", "Use Context Managers", "idioms", "file", "warning"),
     "SC703": RuleDef("SC703", "Avoid Blocking Calls in Async Functions", "idioms", "file", "warning"),
+    "SC704": RuleDef("SC704", "Sync I/O Imports in Async Module", "idioms", "file", "warning"),
+    "SC705": RuleDef("SC705", "asyncio.to_thread Tech Debt", "idioms", "file", "info"),
+    "SC706": RuleDef("SC706", "Conflicting Concurrency Libraries", "idioms", "cross_file", "warning"),
     # --- Family 8: Metrics (SC8xx) ---
     "SC801": RuleDef("SC801", "Low Class Cohesion", "metrics", "metric", "warning"),
     "SC802": RuleDef("SC802", "High Coupling Between Objects", "metrics", "metric", "warning"),
@@ -192,6 +195,9 @@ _RULE_DESCRIPTIONS: dict[str, str] = {
     "SC701": "Mutable default argument (list/dict/set) is shared across all calls.",
     "SC702": "Manual open/close resource cleanup instead of a 'with' context manager.",
     "SC703": "Blocking I/O or sleep calls inside async functions freeze the event loop, preventing concurrent request handling.",
+    "SC704": "Module has async functions but imports synchronous I/O libraries at the top level, risking accidental blocking.",
+    "SC705": "asyncio.to_thread wraps a call that has a native async alternative — works but wastes a thread-pool slot.",
+    "SC706": "Conflicting concurrency libraries: monkey-patching libs (gevent/eventlet) coexist with asyncio-based libs.",
     # Metrics
     "SC801": "Class methods operate on disjoint attribute sets — low cohesion.",
     "SC802": "Class depends on too many other classes — high coupling.",
@@ -399,6 +405,18 @@ _RULE_EXAMPLES: dict[str, tuple[str, str] | None] = {
         "async def handler(request):\n    time.sleep(5)\n    data = requests.get(url)",
         "async def handler(request):\n    await asyncio.sleep(5)\n    data = await aiohttp.get(url)",
     ),
+    "SC704": (
+        "import requests\nasync def fetch(url):\n    return requests.get(url)",
+        "import httpx\nasync def fetch(url):\n    async with httpx.AsyncClient() as c:\n        return await c.get(url)",
+    ),
+    "SC705": (
+        "async def handler():\n    data = await asyncio.to_thread(requests.get, url)",
+        "async def handler():\n    async with httpx.AsyncClient() as c:\n        data = await c.get(url)",
+    ),
+    "SC706": (
+        "# requirements.txt\ngevent\nuvicorn\naiohttp",
+        "# Pick one paradigm:\n# Either gevent OR asyncio-based (uvicorn/aiohttp)",
+    ),
     # --- Metrics ---
     # NB: examples are illustrative patterns, not threshold-triggering code
     "SC801": (
@@ -470,7 +488,8 @@ _REFACTORING_PHASES: tuple[dict, ...] = (
         "label": "Phase 3 — Idioms",
         "description": "Apply Pythonic idioms: context managers, pipelines, async fixes.",
         "rules": [
-            "SC702", "SC604", "SC703", "SC209", "SC403", "SC406",
+            "SC702", "SC604", "SC703", "SC704", "SC705", "SC706",
+            "SC209", "SC403", "SC406",
             "SC405", "SC407", "SC107", "SC205",
         ],
         "execution": "parallel",
@@ -1594,6 +1613,26 @@ _BLOCKING_CALLS: Final = {
 }
 
 
+# Sync I/O libraries that should not be imported at top-level in async modules (SC704)
+_SYNC_IO_LIBRARIES: Final = frozenset({
+    "requests",
+    "urllib.request",
+    "urllib3",
+    "psycopg2",
+    "pymongo",
+    "mysql.connector",
+    "paramiko",
+    "ftplib",
+    "smtplib",
+    "xmlrpc.client",
+})
+
+# Top-level module names for _SYNC_IO_LIBRARIES (used for ``import x`` matching)
+_SYNC_IO_TOP_MODULES: Final = frozenset({
+    lib.split(".")[0] for lib in _SYNC_IO_LIBRARIES
+})
+
+
 def _walk_skip_nested_scopes(node: ast.AST):
     """Yield all descendant nodes, skipping nested function/lambda scopes."""
     for child in ast.iter_child_nodes(node):
@@ -1617,6 +1656,29 @@ def _is_to_thread_call(node: ast.Call) -> bool:
 def _is_run_in_executor_call(node: ast.Call) -> bool:
     """Return True if *node* is ``<expr>.run_in_executor(...)``."""
     return isinstance(node.func, ast.Attribute) and node.func.attr == "run_in_executor"
+
+
+def _resolve_callable_ref(node: ast.expr) -> str | None:
+    """Resolve an AST node representing a callable reference to a ``_BLOCKING_CALLS`` key.
+
+    Unlike ``_get_blocking_call_key`` which expects a ``Call`` node, this handles
+    bare references such as ``time.sleep`` (an ``ast.Attribute``) or ``open``
+    (an ``ast.Name``) as passed to ``asyncio.to_thread(time.sleep, ...)``.
+    """
+    if isinstance(node, ast.Name):
+        return node.id if node.id in _BLOCKING_CALLS else None
+    if isinstance(node, ast.Attribute):
+        # Two-level: mod.sub.func (e.g. os.path.exists)
+        if isinstance(node.value, ast.Attribute) and isinstance(node.value.value, ast.Name):
+            key = f"{node.value.value.id}.{node.value.attr}.{node.attr}"
+            if key in _BLOCKING_CALLS:
+                return key
+        # Single-level: mod.func (e.g. time.sleep)
+        if isinstance(node.value, ast.Name):
+            key = f"{node.value.id}.{node.attr}"
+            if key in _BLOCKING_CALLS:
+                return key
+    return None
 
 
 def _get_blocking_call_key(node: ast.Call) -> str | None:
@@ -1878,6 +1940,9 @@ class SmellDetector(ast.NodeVisitor):
         self._class_methods: dict[str, int] = Counter()
         self._open_calls_outside_with: list[tuple[int, str]] = []
         self._string_concat_lines: set[int] = set()
+        # SC704: track top-level sync I/O imports and async defs
+        self._has_async_def: bool = False
+        self._toplevel_sync_io_imports: list[tuple[int, str]] = []  # (line, lib_name)
 
         # Cross-file data
         self.file_data = FileData(
@@ -2726,10 +2791,18 @@ class SmellDetector(ast.NodeVisitor):
             self._open_calls_outside_with.append((node.lineno, "open"))
 
     def _check_blocking_in_async(self, node: ast.AsyncFunctionDef):
-        """SC703 -- Avoid Blocking Calls in Async Functions."""
+        """SC703 -- Avoid Blocking Calls in Async Functions.
+
+        Also emits SC705 (info) when a blocking call is properly wrapped
+        in ``asyncio.to_thread()`` or ``run_in_executor()`` but has a
+        native async alternative that would avoid consuming a thread.
+        """
         for child in _walk_skip_nested_scopes(node):
             if not isinstance(child, ast.Call):
                 continue
+            # SC705: detect to_thread/run_in_executor wrapping known blocking callables
+            if _is_to_thread_call(child) or _is_run_in_executor_call(child):
+                self._check_to_thread_tech_debt(child)
             # Skip calls wrapped in asyncio.to_thread() or loop.run_in_executor()
             if self._is_offloaded_call(child, node):
                 continue
@@ -2742,6 +2815,38 @@ class SmellDetector(ast.NodeVisitor):
                     "Avoid Blocking Calls in Async Functions",
                     "warning",
                     f"`{display}` blocks the event loop in async function `{node.name}` -- use {alt}",
+                    "idioms",
+                )
+
+    def _check_to_thread_tech_debt(self, wrapper: ast.Call):
+        """SC705 -- Emit info hint when to_thread/run_in_executor wraps a callable
+        that has a known native async alternative."""
+        # For to_thread(func, ...) the callable is arg[0]
+        # For run_in_executor(executor, func, ...) the callable is arg[1]
+        if _is_to_thread_call(wrapper):
+            if not wrapper.args:
+                return
+            func_ref = wrapper.args[0]
+        elif _is_run_in_executor_call(wrapper):
+            if len(wrapper.args) < 2:
+                return
+            func_ref = wrapper.args[1]
+        else:
+            return
+
+        key = _resolve_callable_ref(func_ref)
+        if key is not None and key in _BLOCKING_CALLS:
+            display, alt = _BLOCKING_CALLS[key]
+            # Only hint when a proper async alternative exists
+            # (skip entries whose alternative is asyncio.to_thread() itself)
+            if alt != "asyncio.to_thread()":
+                self._add(
+                    wrapper.lineno,
+                    "SC705",
+                    "asyncio.to_thread Tech Debt",
+                    "info",
+                    f"asyncio.to_thread({display}) works but consumes a thread "
+                    f"-- consider native async alternative: {alt}",
                     "idioms",
                 )
 
@@ -3091,6 +3196,27 @@ class SmellDetector(ast.NodeVisitor):
 
     def visit_Module(self, node: ast.Module):
         self._module_node = node
+        # SC704: scan top-level for async defs and sync I/O imports
+        for stmt in node.body:
+            if isinstance(stmt, ast.AsyncFunctionDef):
+                self._has_async_def = True
+            elif isinstance(stmt, ast.ClassDef):
+                for item in ast.walk(stmt):
+                    if isinstance(item, ast.AsyncFunctionDef):
+                        self._has_async_def = True
+                        break
+            if isinstance(stmt, ast.Import):
+                for alias in stmt.names:
+                    mod = alias.name
+                    if mod in _SYNC_IO_LIBRARIES or mod in _SYNC_IO_TOP_MODULES:
+                        self._toplevel_sync_io_imports.append((stmt.lineno, mod))
+            elif isinstance(stmt, ast.ImportFrom):
+                mod = stmt.module or ""
+                full = mod
+                # Match "from urllib.request import urlopen" etc.
+                if full in _SYNC_IO_LIBRARIES or full.split(".")[0] in _SYNC_IO_TOP_MODULES:
+                    if full in _SYNC_IO_LIBRARIES or full in _SYNC_IO_TOP_MODULES:
+                        self._toplevel_sync_io_imports.append((stmt.lineno, full))
         self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef):
@@ -3304,6 +3430,23 @@ class SmellDetector(ast.NodeVisitor):
                 "Use Context Managers",
                 "warning",
                 f"`{name}()` call without `with` statement -- use context manager",
+                "idioms",
+            )
+        # SC704: sync I/O imports in async modules
+        self._check_sync_io_in_async()
+
+    def _check_sync_io_in_async(self):
+        """SC704 -- Flag sync I/O library imports in modules with async functions."""
+        if not self._has_async_def:
+            return
+        for line, lib in self._toplevel_sync_io_imports:
+            self._add(
+                line,
+                "SC704",
+                "Sync I/O Imports in Async Module",
+                "warning",
+                f"Module has async functions but imports sync I/O library `{lib}` "
+                f"at the top level -- use an async alternative or import inside a function",
                 "idioms",
             )
 
@@ -4046,6 +4189,126 @@ def _detect_lazy_modules(all_data: list[FileData]) -> list[Finding]:
 
 
 # ---------------------------------------------------------------------------
+# SC706: Conflicting concurrency libraries
+# ---------------------------------------------------------------------------
+
+_MONKEY_PATCH_LIBS: Final = frozenset({"gevent", "eventlet"})
+_ASYNCIO_LIBS: Final = frozenset({"uvicorn", "aiohttp", "httpx", "anyio", "trio"})
+
+
+def _parse_requirements_txt(path: Path) -> set[str]:
+    """Extract package names from a requirements.txt file."""
+    names: set[str] = set()
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith("-"):
+                continue
+            # Strip extras, version specifiers, environment markers
+            for sep in (">=", "<=", "!=", "==", "~=", ">", "<", ";", "[", "@"):
+                line = line.split(sep, 1)[0]
+            name = line.strip().lower().replace("-", "_")
+            if name:
+                names.add(name)
+    except (OSError, UnicodeDecodeError):
+        pass
+    return names
+
+
+def _parse_pyproject_toml_deps(path: Path) -> set[str]:
+    """Extract dependency names from pyproject.toml (stdlib parsing only)."""
+    names: set[str] = set()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return names
+    # Simple line-based extraction from [project] dependencies array
+    in_deps = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("dependencies") and "=" in line:
+            in_deps = True
+            # Handle inline: dependencies = ["foo", "bar"]
+            if "[" in line:
+                for item in re.findall(r'"([^"]+)"', line):
+                    dep = re.split(r"[><=!~;\[@]", item)[0].strip().lower().replace("-", "_")
+                    if dep:
+                        names.add(dep)
+                if "]" in line:
+                    in_deps = False
+            continue
+        if in_deps:
+            if "]" in line:
+                in_deps = False
+            for item in re.findall(r'"([^"]+)"', line):
+                dep = re.split(r"[><=!~;\[@]", item)[0].strip().lower().replace("-", "_")
+                if dep:
+                    names.add(dep)
+    return names
+
+
+def _parse_setup_cfg_deps(path: Path) -> set[str]:
+    """Extract dependency names from setup.cfg [options] install_requires."""
+    names: set[str] = set()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return names
+    in_install_requires = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("[") and in_install_requires:
+            break
+        if line == "install_requires =" or line == "install_requires=":
+            in_install_requires = True
+            continue
+        if in_install_requires:
+            if not line or line.startswith("["):
+                break
+            dep = re.split(r"[><=!~;\[@]", line)[0].strip().lower().replace("-", "_")
+            if dep:
+                names.add(dep)
+    return names
+
+
+def _detect_conflicting_concurrency(project_root: Path) -> list[Finding]:
+    """SC706 -- Detect conflicting concurrency libraries in dependency files."""
+    findings: list[Finding] = []
+    dep_files: list[tuple[Path, set[str]]] = []
+
+    # Collect dependencies from known files
+    req_txt = project_root / "requirements.txt"
+    if req_txt.is_file():
+        dep_files.append((req_txt, _parse_requirements_txt(req_txt)))
+    pyproject = project_root / "pyproject.toml"
+    if pyproject.is_file():
+        dep_files.append((pyproject, _parse_pyproject_toml_deps(pyproject)))
+    setup_cfg = project_root / "setup.cfg"
+    if setup_cfg.is_file():
+        dep_files.append((setup_cfg, _parse_setup_cfg_deps(setup_cfg)))
+
+    for dep_file, deps in dep_files:
+        sync_libs = deps & _MONKEY_PATCH_LIBS
+        async_libs = deps & _ASYNCIO_LIBS
+        if sync_libs and async_libs:
+            for slib in sorted(sync_libs):
+                for alib in sorted(async_libs):
+                    findings.append(
+                        _make_finding(
+                            file=str(dep_file),
+                            line=1,
+                            pattern="SC706",
+                            name="Conflicting Concurrency Libraries",
+                            severity="warning",
+                            message=f"Conflicting concurrency libraries: `{slib}` "
+                            f"(monkey-patches stdlib) coexists with `{alib}` (asyncio-based)",
+                            category="idioms",
+                        )
+                    )
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Cross-file analysis dispatcher
 # ---------------------------------------------------------------------------
 
@@ -4117,6 +4380,10 @@ def scan_path(target: Path) -> list[Finding]:
         all_findings.extend(_detect_high_rfc(all_file_data))
         all_findings.extend(_detect_middle_man(all_file_data))
         all_findings.extend(_detect_lazy_modules(all_file_data))
+
+    # SC706: conflicting concurrency libraries (project-level check)
+    if target.is_dir():
+        all_findings.extend(_detect_conflicting_concurrency(target))
 
     return all_findings
 
@@ -4236,6 +4503,11 @@ def scan_paths(
         all_findings.extend(_detect_high_rfc(all_file_data))
         all_findings.extend(_detect_middle_man(all_file_data))
         all_findings.extend(_detect_lazy_modules(all_file_data))
+
+    # SC706: conflicting concurrency libraries (project-level check)
+    for t in targets:
+        root = t if t.is_dir() else t.parent
+        all_findings.extend(_detect_conflicting_concurrency(root))
 
     # --- Apply inline + block suppression ---
     source_cache: dict[str, list[str]] = {}
@@ -4735,9 +5007,9 @@ _HELP_TEXT: Final = textwrap.dedent("""\
 
     Scan Python files for code smells mapped to the 83-pattern refactoring catalog.
 
-    Detects 57 patterns programmatically:
-      - 41 per-file (AST analysis)    — SC1xx..SC7xx (scope: file)
-      - 11 cross-file (import graph)  — SC3xx..SC6xx (scope: cross_file)
+    Detects 60 patterns programmatically:
+      - 43 per-file (AST analysis)    — SC1xx..SC7xx (scope: file)
+      - 12 cross-file (import graph)  — SC3xx..SC7xx (scope: cross_file)
       - 5 OO metrics (LCOM, CBO, …)   — SC8xx        (scope: metric)
 
     Options:
