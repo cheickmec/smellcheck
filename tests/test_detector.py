@@ -3616,17 +3616,33 @@ def test_github_format_escapes_workflow_commands(tmp_path, capsys):
     assert _escape_workflow_data("a:b") == "a:b"
     assert _escape_workflow_data("line1\nline2") == "line1%0Aline2"
 
+    # Comma escaping
+    assert _escape_workflow_value("a,b") == "a%2Cb"
+
     # Integration: scan code with a finding and verify github output is escaped
     p = _write_py(tmp_path, "def foo(x=[]):\n    pass\n")
     findings = scan_path(p)
-    print_findings(findings, output_format="github")
+    assert findings, "expected at least one finding for the integration check"
+    _run_cli(str(p), "--format", "github")
     out = capsys.readouterr().out
     # No raw newlines inside an annotation line (each annotation is one line)
     for line in out.strip().split("\n"):
         if line.startswith("::"):
-            # The title property value should not contain unescaped colons
-            # (colons in the title= value are escaped)
+            # Must have the expected annotation structure
             assert "title=" in line
+            # No bare '::' sequences inside the property section (before the closing '::')
+            # The format is ::level prop=val,...::message — extract the properties section
+            inner = line[2:]  # strip leading '::'
+            prop_section, _, _message = inner.partition("::")
+            # No unescaped colons inside property values (colons only appear as key=value separators
+            # for the level keyword at the very start, not inside values)
+            parts = prop_section.split(" ", 1)  # "level props"
+            if len(parts) == 2:
+                props_str = parts[1]
+                for prop in props_str.split(","):
+                    if "=" in prop:
+                        _key, _, val = prop.partition("=")
+                        assert ":" not in val, f"unescaped colon in annotation property value: {val!r}"
 
 
 def test_baseline_malformed_entry_no_crash(tmp_path, capsys):
