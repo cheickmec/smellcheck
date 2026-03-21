@@ -358,7 +358,7 @@ def test_is_elif_module_level(tmp_path):
             pass
     """)
     findings = scan_path(p)
-    # SC302 should fire at most once for the chain, not once per elif
+    # SC302 should fire exactly once for the chain, not once per elif
     isinstance_chain = [f for f in findings if f.pattern == "SC302"]
     assert len(isinstance_chain) == 1, (
         f"SC302 should fire exactly once for an if/elif isinstance chain, got {len(isinstance_chain)}: "
