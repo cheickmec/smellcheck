@@ -1659,6 +1659,8 @@ def _nesting_depth(node: ast.AST, _depth: int = 0) -> int:
     """Max nesting depth of control flow inside a node."""
     max_d = _depth
     for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
         if isinstance(child, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
             max_d = max(max_d, _nesting_depth(child, _depth + 1))
         else:
@@ -1687,7 +1689,7 @@ def _get_assigned_names(targets: list[ast.AST]) -> list[str]:
 def _cyclomatic_complexity(node: ast.AST) -> int:
     """Compute McCabe cyclomatic complexity of a function/method node."""
     cc = 1
-    for child in ast.walk(node):
+    for child in _walk_skip_nested_scopes(node):
         if isinstance(child, (ast.If, ast.IfExp)):
             cc += 1
         elif isinstance(child, (ast.For, ast.While, ast.AsyncFor)):
@@ -1863,6 +1865,7 @@ class SmellDetector(ast.NodeVisitor):
         self.findings: list[Finding] = []
 
         # State tracking
+        self._module_node: ast.Module | None = None
         self._class_stack: list[ast.ClassDef] = []
         self._func_stack: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self._class_attrs: dict[str, list[str]] = defaultdict(list)
@@ -2048,7 +2051,7 @@ class SmellDetector(ast.NodeVisitor):
 
     def _check_generic_names(self, node: ast.FunctionDef | ast.AsyncFunctionDef):
         """SC202 -- Rename Result Variables: generic names."""
-        for child in ast.walk(node):
+        for child in _walk_skip_nested_scopes(node):
             if isinstance(child, ast.Assign):
                 for name in _get_assigned_names(child.targets):
                     if name in GENERIC_NAMES:
@@ -2067,7 +2070,7 @@ class SmellDetector(ast.NodeVisitor):
             return
         has_self_assignment = False
         has_return_value = False
-        for child in ast.walk(node):
+        for child in _walk_skip_nested_scopes(node):
             if isinstance(child, ast.Assign):
                 for t in child.targets:
                     if (
@@ -2123,7 +2126,7 @@ class SmellDetector(ast.NodeVisitor):
             return
         # Collect all names used in body (skip docstring)
         used_names: set[str] = set()
-        for child in ast.walk(node):
+        for child in _walk_skip_nested_scopes(node):
             if isinstance(child, ast.Name):
                 used_names.add(child.id)
         # Parameter names appear as ast.arg, not ast.Name, in the signature
@@ -2300,7 +2303,7 @@ class SmellDetector(ast.NodeVisitor):
 
     def _check_loop_append(self, node: ast.For | ast.While):
         """SC403 -- Replace Loop with Pipeline."""
-        for stmt in ast.walk(node):
+        for stmt in _walk_skip_nested_scopes(node):
             if (
                 isinstance(stmt, ast.Expr)
                 and isinstance(stmt.value, ast.Call)
@@ -2380,7 +2383,7 @@ class SmellDetector(ast.NodeVisitor):
                 return count
             return 0
 
-        for child in ast.walk(node):
+        for child in _walk_skip_nested_scopes(node):
             if isinstance(child, ast.If):
                 ops = _count_bool_ops(child.test)
                 if ops >= 3:
@@ -2526,7 +2529,7 @@ class SmellDetector(ast.NodeVisitor):
         """SC501 -- Replace Error Codes with Exceptions."""
         return_ints: set[int] = set()
         total_returns = 0
-        for child in ast.walk(node):
+        for child in _walk_skip_nested_scopes(node):
             if isinstance(child, ast.Return) and child.value is not None:
                 total_returns += 1
                 if isinstance(child.value, ast.Constant) and isinstance(
@@ -2555,7 +2558,7 @@ class SmellDetector(ast.NodeVisitor):
 
     def _check_law_of_demeter(self, node: ast.FunctionDef | ast.AsyncFunctionDef):
         """SC502 -- Law of Demeter: chained .attr.attr.attr access."""
-        for child in ast.walk(node):
+        for child in _walk_skip_nested_scopes(node):
             if isinstance(child, ast.Attribute):
                 depth = 1
                 current = child.value
@@ -2646,13 +2649,13 @@ class SmellDetector(ast.NodeVisitor):
         for d in node.args.defaults + node.args.kw_defaults:
             if d is not None:
                 default_nodes.add(id(d))
-        for child in ast.walk(node):
+        for child in _walk_skip_nested_scopes(node):
             if isinstance(child, ast.Return) and isinstance(
                 getattr(child, "value", None), ast.Constant
             ):
                 return_lines.add(child.lineno)
 
-        for child in ast.walk(node):
+        for child in _walk_skip_nested_scopes(node):
             if isinstance(child, ast.Constant) and isinstance(
                 child.value, (int, float)
             ):
@@ -2768,7 +2771,7 @@ class SmellDetector(ast.NodeVisitor):
     def _check_index_access(self, node: ast.FunctionDef | ast.AsyncFunctionDef):
         """SC305 -- Use Unpacking Instead of Indexing."""
         index_accesses: dict[str, list[int]] = defaultdict(list)
-        for child in ast.walk(node):
+        for child in _walk_skip_nested_scopes(node):
             if (
                 isinstance(child, ast.Subscript)
                 and isinstance(child.value, ast.Name)
@@ -2792,7 +2795,7 @@ class SmellDetector(ast.NodeVisitor):
         """SC204 -- Replace NULL with Collection."""
         returns_none = False
         returns_value = False
-        for child in ast.walk(node):
+        for child in _walk_skip_nested_scopes(node):
             if isinstance(child, ast.Return):
                 if child.value is None or _is_none(child.value):
                     returns_none = True
@@ -2803,7 +2806,7 @@ class SmellDetector(ast.NodeVisitor):
                 else:
                     returns_value = True
         if returns_none and returns_value:
-            for child in ast.walk(node):
+            for child in _walk_skip_nested_scopes(node):
                 if (
                     isinstance(child, ast.Return)
                     and child.value is not None
@@ -2838,7 +2841,10 @@ class SmellDetector(ast.NodeVisitor):
                         "hygiene",
                     )
                     return
-                if isinstance(stmt, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
+                _compound = (ast.If, ast.For, ast.While, ast.With, ast.Try)
+                if hasattr(ast, "TryStar"):
+                    _compound = (*_compound, ast.TryStar)
+                if isinstance(stmt, _compound):
                     for attr in ("body", "orelse", "finalbody", "handlers"):
                         sub = getattr(stmt, attr, None)
                         if isinstance(sub, list):
@@ -2855,7 +2861,7 @@ class SmellDetector(ast.NodeVisitor):
         """SC203 -- Replace input() Calls."""
         if node.name in ("main", "__main__", "cli", "repl", "prompt", "interactive"):
             return
-        for child in ast.walk(node):
+        for child in _walk_skip_nested_scopes(node):
             if (
                 isinstance(child, ast.Call)
                 and isinstance(child.func, ast.Name)
@@ -3077,6 +3083,10 @@ class SmellDetector(ast.NodeVisitor):
     # Visitors
     # =======================================================================
 
+    def visit_Module(self, node: ast.Module):
+        self._module_node = node
+        self.generic_visit(node)
+
     def visit_ClassDef(self, node: ast.ClassDef):
         if not self._class_stack and not self._func_stack:
             self.file_data.toplevel_defs += 1
@@ -3189,8 +3199,11 @@ class SmellDetector(ast.NodeVisitor):
         """Check if this If node is an elif (nested inside another If's orelse)."""
         # Walk up through the parent chain by checking func/class bodies
         # Since ast doesn't track parents, we check the enclosing scope's body
-        scope = self._func_stack[-1] if self._func_stack else None
-        if scope is None:
+        if self._func_stack:
+            scope = self._func_stack[-1]
+        elif self._module_node is not None:
+            scope = self._module_node
+        else:
             return False
         for parent in ast.walk(scope):
             if isinstance(parent, ast.If) and parent is not node:
