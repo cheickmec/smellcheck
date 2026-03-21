@@ -3450,8 +3450,8 @@ def _build_module_maps(
     When two files share the same ``Path.stem`` (e.g. ``pkg1/utils.py`` and
     ``pkg2/utils.py``), the stem alone is ambiguous.  For colliding stems we
     fall back to ``parent/stem`` which mirrors how ``_extract_imports`` records
-    dotted imports (e.g. ``from pkg1 import utils`` yields both ``pkg1`` and
-    ``utils``).  Because import matching uses *stem-level* tokens, the
+    dotted imports (e.g. ``from pkg1.sub import x`` yields both ``pkg1`` and
+    ``sub``).  Because import matching uses *stem-level* tokens, the
     collision-safe key is only used for the *graph node identity*; import
     lookups still try the bare stem first and fall back to the qualified form.
     """
