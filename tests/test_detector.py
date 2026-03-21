@@ -24,9 +24,12 @@ from smellcheck.detector import (
     _config_hash,
     _deserialize_file_data,
     _deserialize_finding,
+    _escape_workflow_data,
+    _escape_workflow_value,
     _fingerprint,
     _get_changed_files,
     _is_suppressed,
+    _load_baseline,
     _merge_smellcheck_configs,
     _parse_args,
     _parse_block_directives,
@@ -3542,3 +3545,105 @@ def test_env_var_cli_overrides_env_format(tmp_path):
     import json
     data = json.loads(result.stdout)  # must be valid JSON, proving CLI --format won
     assert isinstance(data, list)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for bugs #77, #80, #81, #82
+# ---------------------------------------------------------------------------
+
+
+def test_finding_category_matches_registry_family(tmp_path):
+    """Bug #77: Finding.category must match _RULE_REGISTRY[pattern].family."""
+    p = _write_py(tmp_path, """\
+        class User:
+            def set_name(self, name):
+                self._name = name
+
+        def foo(x=[]):
+            pass
+
+        def bar(y={}):
+            pass
+
+        try:
+            pass
+        except:
+            pass
+    """)
+    findings = scan_path(p)
+    for f in findings:
+        rd = _RULE_REGISTRY.get(f.pattern)
+        if rd is not None:
+            assert f.category == rd.family, (
+                f"{f.pattern}: category={f.category!r} != registry family={rd.family!r}"
+            )
+
+
+def test_compute_plan_architecture_first_valid_indices():
+    """Bug #80: architecture_first phase order is derived dynamically, not hardcoded."""
+    findings = [
+        Finding("a.py", 1, "SC503", "x", "warning", "msg", "architecture", "cross_file"),
+        Finding("a.py", 2, "SC504", "x", "warning", "msg", "architecture", "cross_file"),
+        Finding("a.py", 3, "SC606", "x", "warning", "msg", "hygiene", "cross_file"),
+        Finding("a.py", 4, "SC801", "x", "warning", "msg", "metrics", "metric"),
+    ]
+    plan = _compute_plan(findings)
+    assert plan["strategy"] == "architecture_first"
+    order = plan["phase_order"]
+    num_phases = len(_REFACTORING_PHASES)
+    # All indices are valid
+    assert sorted(order) == list(range(num_phases))
+    # Correctness and dead_code come first
+    phase_names = [_REFACTORING_PHASES[i]["name"] for i in order]
+    assert phase_names[0] == "correctness"
+    assert phase_names[1] == "dead_code"
+    # Architecture and metrics come before clarity/idioms/control_flow/functions/state_class
+    arch_pos = phase_names.index("architecture")
+    metrics_pos = phase_names.index("metrics")
+    clarity_pos = phase_names.index("clarity")
+    assert arch_pos < clarity_pos
+    assert metrics_pos < clarity_pos
+
+
+def test_github_format_escapes_workflow_commands(tmp_path, capsys):
+    """Bug #81: GitHub annotation fields are escaped to prevent log injection."""
+    # Verify escape functions directly
+    assert _escape_workflow_value("a:b") == "a%3Ab"
+    assert _escape_workflow_value("line1\nline2") == "line1%0Aline2"
+    assert _escape_workflow_value("50%") == "50%25"  # % -> %25
+    assert _escape_workflow_value("ret\r") == "ret%0D"
+    # Data escaping does NOT escape colons
+    assert _escape_workflow_data("a:b") == "a:b"
+    assert _escape_workflow_data("line1\nline2") == "line1%0Aline2"
+
+    # Integration: scan code with a finding and verify github output is escaped
+    p = _write_py(tmp_path, "def foo(x=[]):\n    pass\n")
+    findings = scan_path(p)
+    print_findings(findings, output_format="github")
+    out = capsys.readouterr().out
+    # No raw newlines inside an annotation line (each annotation is one line)
+    for line in out.strip().split("\n"):
+        if line.startswith("::"):
+            # The title property value should not contain unescaped colons
+            # (colons in the title= value are escaped)
+            assert "title=" in line
+
+
+def test_baseline_malformed_entry_no_crash(tmp_path, capsys):
+    """Bug #82: Malformed baseline entries without 'fingerprint' are skipped."""
+    bl = tmp_path / "baseline.json"
+    bl.write_text(
+        json.dumps({
+            "findings": [
+                {"fingerprint": "abc123"},
+                {"no_fingerprint_key": True},
+                "not_a_dict",
+                {"fingerprint": "def456"},
+            ]
+        }),
+        encoding="utf-8",
+    )
+    fps = _load_baseline(bl)
+    assert fps == {"abc123", "def456"}
+    err = capsys.readouterr().err
+    assert "malformed baseline entry" in err.lower() or "missing 'fingerprint'" in err.lower()

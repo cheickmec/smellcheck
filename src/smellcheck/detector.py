@@ -598,10 +598,17 @@ def _compute_plan(findings: list["Finding"]) -> dict:
     )
 
     num_phases = len(_REFACTORING_PHASES)
-    phase_order = (
-        [0, 1, 7, 8, 2, 3, 4, 5, 6] if strategy == "architecture_first"
-        else list(range(num_phases))
-    )
+    if strategy == "architecture_first":
+        # Derive order dynamically: correctness & dead_code first, then
+        # architecture & metrics, then remaining phases in original order.
+        _EARLY = {"correctness", "dead_code"}
+        _PROMOTED = {"architecture", "metrics"}
+        early = [i for i, p in enumerate(_REFACTORING_PHASES) if p["name"] in _EARLY]
+        promoted = [i for i, p in enumerate(_REFACTORING_PHASES) if p["name"] in _PROMOTED]
+        rest = [i for i in range(num_phases) if i not in early and i not in promoted]
+        phase_order = early + promoted + rest
+    else:
+        phase_order = list(range(num_phases))
 
     phases_out: list[dict] = []
     total_rules_hit: set[str] = set()
@@ -1317,7 +1324,17 @@ def _load_baseline(path: Path) -> set[str]:
     if not isinstance(data, dict) or "findings" not in data:
         print(f"Error: baseline file missing 'findings' key: {path}", file=sys.stderr)
         sys.exit(1)
-    return {entry["fingerprint"] for entry in data["findings"]}
+    fps: set[str] = set()
+    for entry in data["findings"]:
+        fp = entry.get("fingerprint") if isinstance(entry, dict) else None
+        if fp is None:
+            print(
+                f"Warning: skipping malformed baseline entry (missing 'fingerprint'): {entry!r}",
+                file=sys.stderr,
+            )
+            continue
+        fps.add(fp)
+    return fps
 
 
 def _filter_baseline(
@@ -1872,6 +1889,8 @@ class SmellDetector(ast.NodeVisitor):
         category: str,
     ):
         rd = _RULE_REGISTRY.get(pattern)
+        # Derive category from the registry to prevent mismatches (bug #77).
+        resolved_category = rd.family if rd else category
         self.findings.append(
             Finding(
                 file=self.filepath,
@@ -1880,7 +1899,7 @@ class SmellDetector(ast.NodeVisitor):
                 name=name,
                 severity=severity,
                 message=message,
-                category=category,
+                category=resolved_category,
                 scope=rd.scope if rd else "file",
             )
         )
@@ -4257,13 +4276,34 @@ def _print_summary(filtered: list[Finding]):
     print()
 
 
+def _escape_workflow_value(s: str) -> str:
+    """Escape a string for use in a GitHub Actions annotation property value."""
+    return (
+        s.replace("%", "%25")
+        .replace("\r", "%0D")
+        .replace("\n", "%0A")
+        .replace(":", "%3A")
+    )
+
+
+def _escape_workflow_data(s: str) -> str:
+    """Escape a string for use as GitHub Actions annotation message data."""
+    return (
+        s.replace("%", "%25")
+        .replace("\r", "%0D")
+        .replace("\n", "%0A")
+    )
+
+
 def _print_github_annotations(filtered: list[Finding]):
     """Print findings as GitHub Actions workflow annotations."""
     _GH_SEV = {"error": "error", "warning": "warning", "info": "notice"}
     for f in filtered:
         sev = _GH_SEV.get(f.severity, "notice")
-        title = f"{f.pattern} {f.name}"
-        print(f"::{sev} file={f.file},line={f.line},title={title}::{f.message}")
+        title = _escape_workflow_value(f"{f.pattern} {f.name}")
+        file_val = _escape_workflow_value(f.file)
+        msg = _escape_workflow_data(f.message)
+        print(f"::{sev} file={file_val},line={f.line},title={title}::{msg}")
 
 
 _SARIF_LEVEL = {"error": "error", "warning": "warning", "info": "note"}
