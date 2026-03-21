@@ -1054,7 +1054,7 @@ def _resolve_extends(
 # ---------------------------------------------------------------------------
 
 _DEFAULT_CACHE_DIR: Final = ".smellcheck-cache"
-_CACHE_VERSION: Final = 2
+_CACHE_VERSION: Final = 3
 
 
 def _cache_key(source: str, config_hash: str, version: str) -> str:
@@ -1179,6 +1179,9 @@ def _serialize_file_data(fd: FileData) -> dict:
         "defined_functions": sorted(fd.defined_functions),
         "called_functions": sorted(fd.called_functions),
         "abstract_classes": sorted(fd.abstract_classes),
+        "async_functions": sorted(fd.async_functions),
+        "function_calls_map": {k: sorted(v) for k, v in fd.function_calls_map.items()},
+        "blocking_calls_in_functions": fd.blocking_calls_in_functions,
         "function_def_count": fd.function_def_count,
         "class_def_count": fd.class_def_count,
         "total_statements": fd.total_statements,
@@ -1210,6 +1213,12 @@ def _deserialize_file_data(d: dict) -> FileData:
         defined_functions=set(d.get("defined_functions", [])),
         called_functions=set(d.get("called_functions", [])),
         abstract_classes=set(d.get("abstract_classes", [])),
+        async_functions=set(d.get("async_functions", [])),
+        function_calls_map={k: set(v) for k, v in d.get("function_calls_map", {}).items()},
+        blocking_calls_in_functions={
+            k: [tuple(x) for x in v]
+            for k, v in d.get("blocking_calls_in_functions", {}).items()
+        },
         function_def_count=d.get("function_def_count", 0),
         class_def_count=d.get("class_def_count", 0),
         total_statements=d.get("total_statements", 0),
@@ -1612,6 +1621,9 @@ _BLOCKING_CALLS: Final = {
     "pickle.dump": ("pickle.dump()", "asyncio.to_thread()"),
 }
 
+# Maximum transitive call-chain depth for cross-file indirect blocking detection (SC703)
+_MAX_CALL_CHAIN_DEPTH: Final = 5
+
 
 # Sync I/O libraries that should not be imported at top-level in async modules (SC704)
 _SYNC_IO_LIBRARIES: Final = frozenset({
@@ -1909,6 +1921,14 @@ class FileData:
     abstract_classes: set[str] = field(
         default_factory=set
     )  # classes with ABC or abstract methods
+    # --- SC703 cross-file call-chain tracing ---
+    async_functions: set[str] = field(default_factory=set)  # async def names
+    function_calls_map: dict[str, set[str]] = field(
+        default_factory=dict
+    )  # func_name -> set of callee names
+    blocking_calls_in_functions: dict[str, list[tuple[str, str]]] = field(
+        default_factory=dict
+    )  # func_name -> [(blocking_key, display_name)]
     # --- SC509 lazy module detection ---
     function_def_count: int = 0  # top-level function defs (not methods)
     class_def_count: int = 0  # top-level class defs
@@ -3074,15 +3094,29 @@ class SmellDetector(ast.NodeVisitor):
     def _collect_defined_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef):
         """Track function definitions for shotgun surgery detection."""
         self.file_data.defined_functions.add(node.name)
+        if isinstance(node, ast.AsyncFunctionDef):
+            self.file_data.async_functions.add(node.name)
 
     def _collect_called_functions(self, node: ast.FunctionDef | ast.AsyncFunctionDef):
-        """Track function calls for shotgun surgery and RFC detection."""
+        """Track function calls for shotgun surgery, RFC, and call-chain detection."""
+        callees: set[str] = set()
+        blocking: list[tuple[str, str]] = []
         for child in ast.walk(node):
             if isinstance(child, ast.Call):
                 if isinstance(child.func, ast.Name):
                     self.file_data.called_functions.add(child.func.id)
+                    callees.add(child.func.id)
                 elif isinstance(child.func, ast.Attribute):
                     self.file_data.called_functions.add(child.func.attr)
+                    callees.add(child.func.attr)
+                # Track blocking calls within this function
+                key = _get_blocking_call_key(child)
+                if key is not None:
+                    display, _alt = _BLOCKING_CALLS[key]
+                    blocking.append((key, display))
+        self.file_data.function_calls_map[node.name] = callees
+        if blocking:
+            self.file_data.blocking_calls_in_functions[node.name] = blocking
 
     def _collect_class_info(self, node: ast.ClassDef):
         """Collect detailed class information for Tier 2/3 analysis."""
@@ -4271,6 +4305,102 @@ def _parse_setup_cfg_deps(path: Path) -> set[str]:
     return names
 
 
+def _detect_indirect_blocking(all_data: list[FileData]) -> list[Finding]:
+    """SC703 -- Cross-file call-chain tracing for indirect blocking in async code.
+
+    If an async function calls a sync helper that transitively calls a known
+    blocking operation, flag the call site in the async function with the full
+    chain.
+    """
+    findings: list[Finding] = []
+
+    # Build global maps: func_name -> file, func_name -> callees, func_name -> blocking
+    # When the same function name is defined in multiple files, track all locations.
+    func_to_file: dict[str, list[str]] = defaultdict(list)
+    func_callees: dict[str, set[str]] = {}
+    func_blocking: dict[str, list[tuple[str, str]]] = {}
+    async_funcs: dict[str, str] = {}  # async_func_name -> filepath
+
+    for fd in all_data:
+        for fname in fd.defined_functions:
+            func_to_file[fname].append(fd.filepath)
+        for fname, callees in fd.function_calls_map.items():
+            func_callees[fname] = callees
+        for fname, blockers in fd.blocking_calls_in_functions.items():
+            func_blocking[fname] = blockers
+        for fname in fd.async_functions:
+            async_funcs[fname] = fd.filepath
+
+    def _trace_blocking(
+        func_name: str, depth: int, visited: set[str]
+    ) -> list[str] | None:
+        """Trace transitive callees looking for a blocking call.
+
+        Returns the chain ``[func_name, ..., blocking_display]`` on hit,
+        or ``None`` if the chain is clean.
+        """
+        if depth > _MAX_CALL_CHAIN_DEPTH:
+            return None
+        if func_name in visited:
+            return None  # cycle
+        visited.add(func_name)
+
+        # Check if this function directly contains a blocking call
+        if func_name in func_blocking:
+            _key, display = func_blocking[func_name][0]
+            return [func_name, display]
+
+        # Recurse into callees
+        callees = func_callees.get(func_name, set())
+        for callee in callees:
+            # Skip if callee is async (it's awaited, not blocking)
+            if callee in async_funcs:
+                continue
+            chain = _trace_blocking(callee, depth + 1, visited.copy())
+            if chain is not None:
+                return [func_name] + chain
+
+        return None
+
+    # For each async function, check its direct sync callees
+    for fd in all_data:
+        for fname in fd.async_functions:
+            callees = fd.function_calls_map.get(fname, set())
+            for callee in callees:
+                # Skip async callees
+                if callee in async_funcs:
+                    continue
+                # Skip if callee is not a defined function (built-in, etc.)
+                if callee not in func_to_file:
+                    continue
+                # Skip if the callee is in the same function (direct blocking
+                # is already caught by per-file SC703)
+                if callee in func_blocking:
+                    # Direct blocking in a function called from async --
+                    # only flag if the callee is in a DIFFERENT file
+                    callee_files = func_to_file.get(callee, [])
+                    if fd.filepath in callee_files and len(callee_files) == 1:
+                        continue
+                # Trace the call chain
+                chain = _trace_blocking(callee, 1, set())
+                if chain is not None:
+                    chain_str = " -> ".join([fname] + chain)
+                    findings.append(
+                        _make_finding(
+                            file=fd.filepath,
+                            line=1,
+                            pattern="SC703",
+                            name="Avoid Blocking Calls in Async Functions",
+                            severity="warning",
+                            message=f"Indirect blocking call chain: `{chain_str}` "
+                            f"-- sync helper called from async function contains blocking I/O",
+                            category="idioms",
+                        )
+                    )
+
+    return findings
+
+
 def _detect_conflicting_concurrency(project_root: Path) -> list[Finding]:
     """SC706 -- Detect conflicting concurrency libraries in dependency files."""
     findings: list[Finding] = []
@@ -4329,6 +4459,8 @@ def cross_file_analysis(all_data: list[FileData]) -> list[Finding]:
     findings.extend(_detect_speculative_generality(all_data))
     findings.extend(_detect_unstable_dependency(all_data))
     findings.extend(_detect_lazy_modules(all_data))
+    # Cross-file async call-chain tracing
+    findings.extend(_detect_indirect_blocking(all_data))
     # Tier 3: OO metrics
     findings.extend(_detect_low_cohesion(all_data))
     findings.extend(_detect_high_coupling(all_data))
