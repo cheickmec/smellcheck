@@ -3518,7 +3518,7 @@ def _detect_cyclic_imports(all_data: list[FileData]) -> list[Finding]:
         if key in reported:
             continue
         reported.add(key)
-        cycle_str = " -> ".join(normalized) + " -> " + normalized[0]
+        cycle_str = " -> ".join(f"`{m}`" for m in normalized) + " -> `" + normalized[0] + "`"
         findings.append(
             _make_finding(
                 file=reverse_map.get(normalized[0], normalized[0]),
