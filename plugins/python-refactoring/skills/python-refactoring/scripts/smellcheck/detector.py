@@ -1661,7 +1661,10 @@ def _nesting_depth(node: ast.AST, _depth: int = 0) -> int:
     for child in ast.iter_child_nodes(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             continue
-        if isinstance(child, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
+        _compound = (ast.If, ast.For, ast.While, ast.With, ast.Try)
+        if hasattr(ast, "TryStar"):
+            _compound = (*_compound, ast.TryStar)
+        if isinstance(child, _compound):
             max_d = max(max_d, _nesting_depth(child, _depth + 1))
         else:
             max_d = max(max_d, _nesting_depth(child, _depth))
@@ -2828,6 +2831,10 @@ class SmellDetector(ast.NodeVisitor):
         """SC401 -- Remove Dead Code."""
         terminal = (ast.Return, ast.Raise, ast.Break, ast.Continue)
 
+        _compound = (ast.If, ast.For, ast.While, ast.With, ast.Try)
+        if hasattr(ast, "TryStar"):
+            _compound = (*_compound, ast.TryStar)
+
         def _check_body(body: list[ast.stmt]):
             for i, stmt in enumerate(body):
                 if isinstance(stmt, terminal) and i < len(body) - 1:
@@ -2841,9 +2848,6 @@ class SmellDetector(ast.NodeVisitor):
                         "hygiene",
                     )
                     return
-                _compound = (ast.If, ast.For, ast.While, ast.With, ast.Try)
-                if hasattr(ast, "TryStar"):
-                    _compound = (*_compound, ast.TryStar)
                 if isinstance(stmt, _compound):
                     for attr in ("body", "orelse", "finalbody", "handlers"):
                         sub = getattr(stmt, attr, None)

@@ -327,11 +327,11 @@ def test_nesting_depth_ignores_nested_functions(tmp_path):
             return inner
     """)
     findings = scan_path(p)
-    # SC201 (deep nesting) should fire for inner() but NOT for outer()
-    nesting = [f for f in findings if f.pattern == "SC201"]
+    # SC402 (deep nesting) should fire for inner() but NOT for outer()
+    nesting = [f for f in findings if f.pattern == "SC402"]
     outer_nesting = [f for f in nesting if "outer" in f.message]
     assert not outer_nesting, (
-        f"SC201 should not fire for outer() due to inner()'s nesting: {outer_nesting}"
+        f"SC402 should not fire for outer() due to inner()'s nesting: {outer_nesting}"
     )
 
 
