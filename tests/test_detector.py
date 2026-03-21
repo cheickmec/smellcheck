@@ -1072,6 +1072,191 @@ def test_sc706_no_flag_sync_only(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# SC703: Cross-file call-chain tracing for indirect blocking
+# ---------------------------------------------------------------------------
+
+
+def test_sc703_cross_file_indirect_blocking(tmp_path):
+    """Async calls sync helper in another file that calls blocking I/O."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        def slow_helper():
+            time.sleep(5)
+        """,
+        name="utils.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        from utils import slow_helper
+
+        async def handle_request():
+            slow_helper()
+        """,
+        name="main.py",
+    )
+    findings = scan_path(tmp_path)
+    indirect = [
+        f for f in findings
+        if f.pattern == "SC703" and "Indirect blocking" in f.message
+    ]
+    assert len(indirect) >= 1
+    msg = indirect[0].message
+    assert "handle_request" in msg
+    assert "slow_helper" in msg
+    assert "time.sleep" in msg
+
+
+def test_sc703_cross_file_clean_helper_no_flag(tmp_path):
+    """Async calls sync helper that does NOT contain blocking I/O."""
+    _write_py(
+        tmp_path,
+        """\
+        def clean_helper():
+            return 42
+        """,
+        name="utils.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        from utils import clean_helper
+
+        async def handle_request():
+            clean_helper()
+        """,
+        name="main.py",
+    )
+    findings = scan_path(tmp_path)
+    indirect = [
+        f for f in findings
+        if f.pattern == "SC703" and "Indirect blocking" in f.message
+    ]
+    assert indirect == []
+
+
+def test_sc703_cross_file_transitive_chain(tmp_path):
+    """Async -> sync helper -> another sync helper -> blocking I/O."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        def deep_blocker():
+            time.sleep(1)
+        """,
+        name="deep.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        from deep import deep_blocker
+
+        def middle():
+            deep_blocker()
+        """,
+        name="middle.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        from middle import middle
+
+        async def handler():
+            middle()
+        """,
+        name="main.py",
+    )
+    findings = scan_path(tmp_path)
+    indirect = [
+        f for f in findings
+        if f.pattern == "SC703" and "Indirect blocking" in f.message
+    ]
+    assert len(indirect) >= 1
+    msg = indirect[0].message
+    assert "handler" in msg
+    assert "middle" in msg
+
+
+def test_sc703_cross_file_to_thread_no_flag(tmp_path):
+    """Async offloads sync helper via asyncio.to_thread -- not flagged as indirect."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        def slow_helper():
+            time.sleep(5)
+        """,
+        name="utils.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        import asyncio
+        from utils import slow_helper
+
+        async def handle_request():
+            await asyncio.to_thread(slow_helper)
+        """,
+        name="main.py",
+    )
+    findings = scan_path(tmp_path)
+    indirect = [
+        f for f in findings
+        if f.pattern == "SC703" and "Indirect blocking" in f.message
+    ]
+    # asyncio.to_thread(slow_helper) passes slow_helper as an argument, not a
+    # direct call.  The call map for handle_request records "to_thread" as a
+    # callee, not "slow_helper", so no indirect blocking chain is traced.
+    assert indirect == []
+
+
+def test_sc703_cross_file_max_depth(tmp_path):
+    """Chain deeper than _MAX_CALL_CHAIN_DEPTH is not flagged."""
+    # Build a chain of 7 functions: f0 -> f1 -> ... -> f6 -> blocking
+    # With _MAX_CALL_CHAIN_DEPTH=5, the chain from f0 should not reach f6
+    for i in range(7):
+        if i == 6:
+            code = f"""\
+            import time
+
+            def f{i}():
+                time.sleep(1)
+            """
+        else:
+            code = f"""\
+            from f{i+1} import f{i+1}
+
+            def f{i}():
+                f{i+1}()
+            """
+        _write_py(tmp_path, code, name=f"f{i}.py")
+    _write_py(
+        tmp_path,
+        """\
+        from f0 import f0
+
+        async def entry():
+            f0()
+        """,
+        name="main.py",
+    )
+    findings = scan_path(tmp_path)
+    indirect = [
+        f for f in findings
+        if f.pattern == "SC703" and "Indirect blocking" in f.message
+        and "entry" in f.message
+    ]
+    # Chain is entry -> f0 -> f1 -> f2 -> f3 -> f4 -> f5 -> f6 -> blocking
+    # That's depth 7 from f0, exceeding _MAX_CALL_CHAIN_DEPTH=5
+    assert indirect == []
+
+
+# ---------------------------------------------------------------------------
 # --explain
 # ---------------------------------------------------------------------------
 
