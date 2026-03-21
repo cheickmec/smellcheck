@@ -1655,16 +1655,18 @@ def _lines_of(node: ast.AST) -> int:
     return 0
 
 
+_NESTING_COMPOUND = (ast.If, ast.For, ast.While, ast.With, ast.Try)
+if hasattr(ast, "TryStar"):
+    _NESTING_COMPOUND = (*_NESTING_COMPOUND, ast.TryStar)
+
+
 def _nesting_depth(node: ast.AST, _depth: int = 0) -> int:
     """Max nesting depth of control flow inside a node."""
     max_d = _depth
     for child in ast.iter_child_nodes(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             continue
-        _compound = (ast.If, ast.For, ast.While, ast.With, ast.Try)
-        if hasattr(ast, "TryStar"):
-            _compound = (*_compound, ast.TryStar)
-        if isinstance(child, _compound):
+        if isinstance(child, _NESTING_COMPOUND):
             max_d = max(max_d, _nesting_depth(child, _depth + 1))
         else:
             max_d = max(max_d, _nesting_depth(child, _depth))
