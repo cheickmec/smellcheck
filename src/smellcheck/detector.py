@@ -3417,24 +3417,80 @@ def _detect_duplicate_functions(all_data: list[FileData]) -> list[Finding]:
     return findings
 
 
-def _detect_cyclic_imports(all_data: list[FileData]) -> list[Finding]:
-    """SC503 -- Circular imports via DFS on intra-project import graph."""
-    module_map = {fd.filepath: Path(fd.filepath).stem for fd in all_data}
+def _build_module_maps(
+    all_data: list[FileData],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Build filepath->module and module->filepath maps, handling duplicate stems.
+
+    When two files share the same ``Path.stem`` (e.g. ``pkg1/utils.py`` and
+    ``pkg2/utils.py``), the stem alone is ambiguous.  For colliding stems we
+    fall back to ``parent/stem`` which mirrors how ``_extract_imports`` records
+    dotted imports (e.g. ``from pkg1 import utils`` yields both ``pkg1`` and
+    ``utils``).  Because import matching uses *stem-level* tokens, the
+    collision-safe key is only used for the *graph node identity*; import
+    lookups still try the bare stem first and fall back to the qualified form.
+    """
+    # First pass: detect stem collisions
+    stem_count: dict[str, int] = {}
+    for fd in all_data:
+        stem = Path(fd.filepath).stem
+        stem_count[stem] = stem_count.get(stem, 0) + 1
+
+    # Second pass: build maps using qualified names for colliding stems
+    module_map: dict[str, str] = {}
+    for fd in all_data:
+        p = Path(fd.filepath)
+        stem = p.stem
+        if stem_count[stem] > 1:
+            # Use parent/stem to disambiguate (e.g. "pkg1/utils")
+            module_map[fd.filepath] = f"{p.parent.name}/{stem}"
+        else:
+            module_map[fd.filepath] = stem
+
     reverse_map: dict[str, str] = {v: k for k, v in module_map.items()}
+    return module_map, reverse_map
+
+
+def _build_import_graph(
+    all_data: list[FileData],
+    module_map: dict[str, str],
+    reverse_map: dict[str, str],
+) -> dict[str, set[str]]:
+    """Build a directed import graph from file data.
+
+    For each file, each imported token is checked against known modules.
+    Qualified (``parent/stem``) entries are preferred when they exist in
+    ``reverse_map`` so that files with duplicate stems are matched correctly.
+    """
     import_graph: dict[str, set[str]] = defaultdict(set)
     for fd in all_data:
         src_module = module_map[fd.filepath]
+        src_parent = Path(fd.filepath).parent.name
         for imp in fd.imports:
-            if imp in reverse_map:
+            # Try qualified form first (handles colliding stems)
+            qualified = f"{src_parent}/{imp}"
+            if qualified in reverse_map:
+                import_graph[src_module].add(qualified)
+            elif imp in reverse_map:
                 import_graph[src_module].add(imp)
+    return import_graph
+
+
+def _detect_cyclic_imports(all_data: list[FileData]) -> list[Finding]:
+    """SC503 -- Circular imports via DFS on intra-project import graph."""
+    module_map, reverse_map = _build_module_maps(all_data)
+    import_graph = _build_import_graph(all_data, module_map, reverse_map)
 
     visited: set[str] = set()
     in_stack: set[str] = set()
-    cycles: list[tuple[str, str]] = []
+    raw_cycles: list[tuple[str, ...]] = []
 
     def _dfs(node: str, path: list[str]):
         if node in in_stack:
-            cycles.append((path[-1], node))
+            # Extract the cycle from path: find where 'node' first appears
+            idx = path.index(node)
+            cycle = tuple(path[idx:])
+            raw_cycles.append(cycle)
             return
         if node in visited:
             return
@@ -3451,21 +3507,26 @@ def _detect_cyclic_imports(all_data: list[FileData]) -> list[Finding]:
         in_stack.clear()
         _dfs(module, [])
 
+    # Deduplicate cycles: normalize each cycle by rotating to its minimum
+    # element, then use the tuple as the dedup key.
     findings: list[Finding] = []
-    reported: set[frozenset[str]] = set()
-    for a, b in cycles:
-        key = frozenset({a, b})
+    reported: set[tuple[str, ...]] = set()
+    for cycle in raw_cycles:
+        min_idx = cycle.index(min(cycle))
+        normalized = cycle[min_idx:] + cycle[:min_idx]
+        key = normalized
         if key in reported:
             continue
         reported.add(key)
+        cycle_str = " -> ".join(normalized) + " -> " + normalized[0]
         findings.append(
             _make_finding(
-                file=reverse_map.get(a, a),
+                file=reverse_map.get(normalized[0], normalized[0]),
                 line=1,
                 pattern="SC503",
                 name="Break Cyclic Import",
                 severity="warning",
-                message=f"Circular import: `{a}` <-> `{b}` -- extract shared types to break cycle",
+                message=f"Circular import: {cycle_str} -- extract shared types to break cycle",
                 category="architecture",
             )
         )
@@ -3720,17 +3781,15 @@ def _detect_speculative_generality(all_data: list[FileData]) -> list[Finding]:
 
 def _detect_unstable_dependency(all_data: list[FileData]) -> list[Finding]:
     """SC508 -- Module depends on a more unstable module (Robert Martin's I metric)."""
-    module_map = {fd.filepath: Path(fd.filepath).stem for fd in all_data}
-    reverse_map: dict[str, str] = {v: k for k, v in module_map.items()}
+    module_map, reverse_map = _build_module_maps(all_data)
+    import_graph = _build_import_graph(all_data, module_map, reverse_map)
 
     outgoing: dict[str, set[str]] = defaultdict(set)
     incoming: dict[str, set[str]] = defaultdict(set)
-    for fd in all_data:
-        src = module_map[fd.filepath]
-        for imp in fd.imports:
-            if imp in reverse_map:
-                outgoing[src].add(imp)
-                incoming[imp].add(src)
+    for src, deps in import_graph.items():
+        for dep in deps:
+            outgoing[src].add(dep)
+            incoming[dep].add(src)
 
     instability: dict[str, float] = {}
     for module in module_map.values():
@@ -3828,13 +3887,13 @@ def _detect_high_coupling(all_data: list[FileData]) -> list[Finding]:
 
 def _detect_fan_out(all_data: list[FileData]) -> list[Finding]:
     """SC803 -- Excessive module fan-out (outgoing dependencies)."""
-    module_map = {fd.filepath: Path(fd.filepath).stem for fd in all_data}
-    reverse_map: dict[str, str] = {v: k for k, v in module_map.items()}
+    module_map, reverse_map = _build_module_maps(all_data)
+    import_graph = _build_import_graph(all_data, module_map, reverse_map)
 
     findings: list[Finding] = []
     for fd in all_data:
         src = module_map[fd.filepath]
-        outgoing = {imp for imp in fd.imports if imp in reverse_map}
+        outgoing = import_graph.get(src, set())
         if len(outgoing) > MAX_FANOUT:
             findings.append(
                 _make_finding(
