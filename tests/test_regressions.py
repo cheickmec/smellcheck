@@ -199,20 +199,20 @@ def test_cross_file_duplicate_stem_not_dropped(tmp_path):
     pkg2 = tmp_path / "pkg2"
     pkg1.mkdir()
     pkg2.mkdir()
-    # pkg1/utils.py imports pkg2's utils (via stem "utils")
+    # pkg1/utils.py imports pkg2's utils
     (pkg1 / "utils.py").write_text(
-        "import utils\ndef helper1(): pass\n", encoding="utf-8"
+        "import pkg2.utils\ndef helper1(): pass\n", encoding="utf-8"
     )
-    # pkg2/utils.py imports pkg1's utils (via stem "utils")
+    # pkg2/utils.py imports pkg1's utils
     (pkg2 / "utils.py").write_text(
-        "import utils\ndef helper2(): pass\n", encoding="utf-8"
+        "import pkg1.utils\ndef helper2(): pass\n", encoding="utf-8"
     )
     # Key invariant: scanning 2 files must not silently reduce to 1.
     # Verify both files are individually scannable.
     from smellcheck.detector import scan_file, _build_module_maps
     fd1 = scan_file(pkg1 / "utils.py")
     fd2 = scan_file(pkg2 / "utils.py")
-    assert fd1 is not None and fd2 is not None, "Both files must be scannable"
+    assert isinstance(fd1, tuple) and isinstance(fd2, tuple), "scan_file must return (findings, FileData)"
     # Verify the module map doesn't collapse duplicate stems.
     all_data = [fd1[1], fd2[1]]
     module_map, _ = _build_module_maps(all_data)
