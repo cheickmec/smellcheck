@@ -1333,6 +1333,12 @@ def _load_baseline(path: Path) -> set[str]:
                 file=sys.stderr,
             )
             continue
+        if not isinstance(fp, str):
+            print(
+                f"Warning: skipping malformed baseline entry (non-string 'fingerprint'): {entry!r}",
+                file=sys.stderr,
+            )
+            continue
         fps.add(fp)
     return fps
 
@@ -4283,6 +4289,7 @@ def _escape_workflow_value(s: str) -> str:
         .replace("\r", "%0D")
         .replace("\n", "%0A")
         .replace(":", "%3A")
+        .replace(",", "%2C")
     )
 
 
