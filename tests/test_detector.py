@@ -3403,6 +3403,78 @@ def test_SC503_break_cyclic_import(tmp_path):
     assert any(f.pattern == "SC503" for f in findings)
 
 
+def test_tarjan_scc_complex_graph(tmp_path):
+    """Tarjan SCC correctly handles complex graphs: multi-node cycles, disjoint
+    cycles, nodes not in any cycle, and self-loops (single-node SCCs ignored)."""
+    from smellcheck.detector import _tarjan_scc
+
+    # Graph: a->b->c->a (3-cycle), d->e->d (2-cycle), f->g (no cycle), h->h (self-loop)
+    graph = {
+        "a": {"b"},
+        "b": {"c"},
+        "c": {"a"},
+        "d": {"e"},
+        "e": {"d"},
+        "f": {"g"},
+        "g": set(),
+        "h": {"h"},
+    }
+    sccs = _tarjan_scc(graph)
+    # Only SCCs with 2+ nodes are returned
+    scc_sets = [frozenset(s) for s in sccs]
+    assert frozenset({"a", "b", "c"}) in scc_sets
+    assert frozenset({"d", "e"}) in scc_sets
+    # f, g, h are not part of any multi-node SCC
+    all_nodes = {n for s in sccs for n in s}
+    assert "f" not in all_nodes
+    assert "g" not in all_nodes
+    assert "h" not in all_nodes
+    assert len(sccs) == 2
+
+
+def test_tarjan_scc_no_cycles():
+    """Tarjan SCC returns empty list for a DAG."""
+    from smellcheck.detector import _tarjan_scc
+
+    graph = {"a": {"b"}, "b": {"c"}, "c": set()}
+    assert _tarjan_scc(graph) == []
+
+
+def test_SC503_three_node_cycle(tmp_path):
+    """Three-module cycle is detected and reported exactly once."""
+    (tmp_path / "mod_x.py").write_text("import mod_y\n", encoding="utf-8")
+    (tmp_path / "mod_y.py").write_text("import mod_z\n", encoding="utf-8")
+    (tmp_path / "mod_z.py").write_text("import mod_x\n", encoding="utf-8")
+    findings = scan_paths(list(tmp_path.glob("*.py")))
+    sc503 = [f for f in findings if f.pattern == "SC503"]
+    assert len(sc503) == 1
+    assert "mod_x" in sc503[0].message or "mod_y" in sc503[0].message or "mod_z" in sc503[0].message
+
+
+def test_is_elif_uses_parent_map(tmp_path):
+    """_is_elif correctly identifies elif branches using the cached parent map."""
+    code = """\
+x = 1
+if x == 1:
+    pass
+elif x == 2:
+    pass
+elif x == 3:
+    pass
+else:
+    pass
+"""
+    p = _write_py(tmp_path, code)
+    # SC412 (missing else) and isinstance-chain checks depend on _is_elif
+    # working correctly. The absence of false positives on elif branches
+    # is the observable effect we can test via scan_paths.
+    findings = scan_paths([p])
+    # There should be no SC412 finding triggered on the elif branches themselves
+    sc412 = [f for f in findings if f.pattern == "SC412"]
+    # The top-level if has an else, so no SC412 expected at all
+    assert len(sc412) == 0
+
+
 def test_SC504_split_god_module(tmp_path):
     defs = "\n".join([f"def func_{i}(): pass" for i in range(35)])
     mod = tmp_path / "god.py"
