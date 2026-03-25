@@ -2845,7 +2845,7 @@ class SmellDetector(ast.NodeVisitor):
                     "SC705",
                     "asyncio.to_thread Tech Debt",
                     "info",
-                    f"asyncio.to_thread({display}) works but consumes a thread "
+                    f"asyncio.to_thread({display.rstrip('()')}) works but consumes a thread "
                     f"-- consider native async alternative: {alt}",
                     "idioms",
                 )
@@ -4505,8 +4505,12 @@ def scan_paths(
         all_findings.extend(_detect_lazy_modules(all_file_data))
 
     # SC706: conflicting concurrency libraries (project-level check)
+    seen_roots: set[Path] = set()
     for t in targets:
         root = t if t.is_dir() else t.parent
+        if root in seen_roots:
+            continue
+        seen_roots.add(root)
         all_findings.extend(_detect_conflicting_concurrency(root))
 
     # --- Apply inline + block suppression ---
