@@ -3403,7 +3403,7 @@ def test_SC503_break_cyclic_import(tmp_path):
     assert any(f.pattern == "SC503" for f in findings)
 
 
-def test_tarjan_scc_complex_graph(tmp_path):
+def test_tarjan_scc_complex_graph():
     """Tarjan SCC correctly handles complex graphs: multi-node cycles, disjoint
     cycles, nodes not in any cycle, and self-loops (single-node SCCs ignored)."""
     from smellcheck.detector import _tarjan_scc

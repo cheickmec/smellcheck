@@ -3783,11 +3783,16 @@ def _detect_cyclic_imports(all_data: list[FileData]) -> list[Finding]:
             current = min(nexts)  # deterministic choice
             ordered.append(current)
             visited_in_chain.add(current)
-        normalized = tuple(ordered)
+        # Verify closing edge exists; if not, fall back to sorted member list
+        last = ordered[-1]
+        if start in import_graph.get(last, set()):
+            cycle_str = " -> ".join(f"`{m}`" for m in ordered) + " -> `" + ordered[0] + "`"
+        else:
+            cycle_str = ", ".join(f"`{m}`" for m in sorted(scc_set))
+        normalized = tuple(sorted(scc_set))  # canonical key regardless of walk order
         if normalized in reported:
             continue
         reported.add(normalized)
-        cycle_str = " -> ".join(f"`{m}`" for m in normalized) + " -> `" + normalized[0] + "`"
         findings.append(
             _make_finding(
                 file=reverse_map.get(normalized[0], normalized[0]),
