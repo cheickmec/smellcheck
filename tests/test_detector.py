@@ -1256,6 +1256,33 @@ def test_sc703_cross_file_max_depth(tmp_path):
     assert indirect == []
 
 
+def test_sc703_same_file_indirect_blocking(tmp_path):
+    """Async calls a sync helper in the same file that performs a blocking call."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        def sync_helper():
+            time.sleep(3)
+
+        async def handle():
+            sync_helper()
+        """,
+        name="app.py",
+    )
+    findings = scan_path(tmp_path)
+    indirect = [
+        f for f in findings
+        if f.pattern == "SC703" and "Indirect blocking" in f.message
+    ]
+    assert len(indirect) >= 1
+    msg = indirect[0].message
+    assert "handle" in msg
+    assert "sync_helper" in msg
+    assert "time.sleep" in msg
+
+
 # ---------------------------------------------------------------------------
 # --explain
 # ---------------------------------------------------------------------------
