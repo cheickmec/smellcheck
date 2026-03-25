@@ -3770,10 +3770,20 @@ def _detect_cyclic_imports(all_data: list[FileData]) -> list[Finding]:
     findings: list[Finding] = []
     reported: set[tuple[str, ...]] = set()
     for scc in sccs:
-        # Normalize: rotate to minimum element for stable deduplication
-        min_elem = min(scc)
-        min_idx = scc.index(min_elem)
-        normalized = tuple(scc[min_idx:] + scc[:min_idx])
+        # Reconstruct actual import order by walking the graph from min element
+        scc_set = set(scc)
+        start = min(scc)
+        ordered: list[str] = [start]
+        visited_in_chain: set[str] = {start}
+        current = start
+        while True:
+            nexts = [n for n in import_graph.get(current, set()) if n in scc_set and n not in visited_in_chain]
+            if not nexts:
+                break
+            current = min(nexts)  # deterministic choice
+            ordered.append(current)
+            visited_in_chain.add(current)
+        normalized = tuple(ordered)
         if normalized in reported:
             continue
         reported.add(normalized)
