@@ -3253,6 +3253,11 @@ class SmellDetector(ast.NodeVisitor):
 
     def visit_Module(self, node: ast.Module):
         self._module_node = node
+        # Build parent map once for O(1) elif lookups (avoids O(n) ast.walk per If node)
+        self._parent_map: dict[ast.AST, ast.AST] = {}
+        for parent in ast.walk(node):
+            for child in ast.iter_child_nodes(parent):
+                self._parent_map[child] = parent
         # SC704: scan top-level for async defs and sync I/O imports
         for stmt in node.body:
             if isinstance(stmt, ast.AsyncFunctionDef):
@@ -3386,19 +3391,10 @@ class SmellDetector(ast.NodeVisitor):
 
     def _is_elif(self, node: ast.If) -> bool:
         """Check if this If node is an elif (nested inside another If's orelse)."""
-        # Walk up through the parent chain by checking func/class bodies
-        # Since ast doesn't track parents, we check the enclosing scope's body
-        if self._func_stack:
-            scope = self._func_stack[-1]
-        elif self._module_node is not None:
-            scope = self._module_node
-        else:
+        parent = self._parent_map.get(node)
+        if parent is None:
             return False
-        for parent in ast.walk(scope):
-            if isinstance(parent, ast.If) and parent is not node:
-                if len(parent.orelse) == 1 and parent.orelse[0] is node:
-                    return True
-        return False
+        return isinstance(parent, ast.If) and len(parent.orelse) == 1 and parent.orelse[0] is node
 
     def visit_For(self, node: ast.For):
         self._check_loop_append(node)
@@ -3720,48 +3716,67 @@ def _build_import_graph(
     return import_graph
 
 
+def _tarjan_scc(graph: dict[str, set[str]]) -> list[list[str]]:
+    """Find all strongly connected components via Tarjan's algorithm.
+
+    Returns only SCCs with 2+ nodes (i.e. actual cycles), in O(V+E) time.
+    """
+    index_counter = [0]
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    sccs: list[list[str]] = []
+
+    def strongconnect(v: str) -> None:
+        indices[v] = index_counter[0]
+        lowlinks[v] = index_counter[0]
+        index_counter[0] += 1
+        stack.append(v)
+        on_stack.add(v)
+
+        for w in graph.get(v, set()):
+            if w not in indices:
+                strongconnect(w)
+                lowlinks[v] = min(lowlinks[v], lowlinks[w])
+            elif w in on_stack:
+                lowlinks[v] = min(lowlinks[v], indices[w])
+
+        if lowlinks[v] == indices[v]:
+            scc: list[str] = []
+            while True:
+                w = stack.pop()
+                on_stack.discard(w)
+                scc.append(w)
+                if w == v:
+                    break
+            if len(scc) > 1:  # only report cycles (SCC with 2+ nodes)
+                sccs.append(scc)
+
+    for v in graph:
+        if v not in indices:
+            strongconnect(v)
+
+    return sccs
+
+
 def _detect_cyclic_imports(all_data: list[FileData]) -> list[Finding]:
-    """SC503 -- Circular imports via DFS on intra-project import graph."""
+    """SC503 -- Circular imports via Tarjan SCC on intra-project import graph."""
     module_map, reverse_map = _build_module_maps(all_data)
     import_graph = _build_import_graph(all_data, module_map, reverse_map)
 
-    visited: set[str] = set()
-    in_stack: set[str] = set()
-    raw_cycles: list[tuple[str, ...]] = []
+    sccs = _tarjan_scc(import_graph)
 
-    def _dfs(node: str, path: list[str]):
-        if node in in_stack:
-            # Extract the cycle from path: find where 'node' first appears
-            idx = path.index(node)
-            cycle = tuple(path[idx:])
-            raw_cycles.append(cycle)
-            return
-        if node in visited:
-            return
-        visited.add(node)
-        in_stack.add(node)
-        path.append(node)
-        for neighbor in import_graph.get(node, set()):
-            _dfs(neighbor, path)
-        path.pop()
-        in_stack.discard(node)
-
-    for module in import_graph:
-        visited.clear()
-        in_stack.clear()
-        _dfs(module, [])
-
-    # Deduplicate cycles: normalize each cycle by rotating to its minimum
-    # element, then use the tuple as the dedup key.
     findings: list[Finding] = []
     reported: set[tuple[str, ...]] = set()
-    for cycle in raw_cycles:
-        min_idx = cycle.index(min(cycle))
-        normalized = cycle[min_idx:] + cycle[:min_idx]
-        key = normalized
-        if key in reported:
+    for scc in sccs:
+        # Normalize: rotate to minimum element for stable deduplication
+        min_elem = min(scc)
+        min_idx = scc.index(min_elem)
+        normalized = tuple(scc[min_idx:] + scc[:min_idx])
+        if normalized in reported:
             continue
-        reported.add(key)
+        reported.add(normalized)
         cycle_str = " -> ".join(f"`{m}`" for m in normalized) + " -> `" + normalized[0] + "`"
         findings.append(
             _make_finding(
