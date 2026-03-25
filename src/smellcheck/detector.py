@@ -3783,9 +3783,9 @@ def _detect_cyclic_imports(all_data: list[FileData]) -> list[Finding]:
             current = min(nexts)  # deterministic choice
             ordered.append(current)
             visited_in_chain.add(current)
-        # Verify closing edge exists; if not, fall back to sorted member list
+        # Use arrow notation only if walk visited all members and closing edge exists
         last = ordered[-1]
-        if start in import_graph.get(last, set()):
+        if len(ordered) == len(scc_set) and start in import_graph.get(last, set()):
             cycle_str = " -> ".join(f"`{m}`" for m in ordered) + " -> `" + ordered[0] + "`"
         else:
             cycle_str = ", ".join(f"`{m}`" for m in sorted(scc_set))
