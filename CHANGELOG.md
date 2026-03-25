@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.10](https://github.com/cheickmec/smellcheck/compare/v0.3.9...v0.3.10) (2026-03-25)
+
+
+### Features
+
+* add cross-file call-chain tracing for indirect blocking in async code ([57c8233](https://github.com/cheickmec/smellcheck/commit/57c8233be5163d693aa13d421062595102e07b60)), closes [#67](https://github.com/cheickmec/smellcheck/issues/67)
+* add SC704, SC705, SC706 async detection rules ([aa3dd7b](https://github.com/cheickmec/smellcheck/commit/aa3dd7bd1728ff273762e75696f169cb8be52575))
+
+
+### Bug Fixes
+
+* clean SC705 message phrasing and deduplicate concurrency check roots ([a94b5f6](https://github.com/cheickmec/smellcheck/commit/a94b5f64cebd2b8afd79103236b2ce35319ccb06))
+* fall back to sorted list when SCC walk doesn't visit all members ([32b73ed](https://github.com/cheickmec/smellcheck/commit/32b73edfa93bdfe780c1110b78cde41510559f78))
+* qualify call-chain keys, fix nested scope traversal, remove same-file skip, add call-site line numbers ([d361d57](https://github.com/cheickmec/smellcheck/commit/d361d57dc6ab864a63d39f2852791a1d927b8125))
+* reconstruct actual import order from graph instead of using SCC set order ([37814bb](https://github.com/cheickmec/smellcheck/commit/37814bb49730b42c3c0914ec2d22311334410309))
+* verify closing edge in SCC cycle display and remove unused fixture ([5ab0bb8](https://github.com/cheickmec/smellcheck/commit/5ab0bb8fe0f7882ce4388aaf6d84dbcce8e9195a))
+
+
+### Performance
+
+* replace DFS with Tarjan SCC and cache parent map for _is_elif ([9069999](https://github.com/cheickmec/smellcheck/commit/9069999ccfce415a83fd43a857b29f01fa0a53c3))
+
 ## [0.3.9](https://github.com/cheickmec/smellcheck/compare/v0.3.8...v0.3.9) (2026-03-21)
 
 
