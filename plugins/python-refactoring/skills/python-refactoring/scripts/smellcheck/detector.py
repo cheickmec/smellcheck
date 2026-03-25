@@ -1181,6 +1181,7 @@ def _serialize_file_data(fd: FileData) -> dict:
         "abstract_classes": sorted(fd.abstract_classes),
         "async_functions": sorted(fd.async_functions),
         "function_calls_map": {k: sorted(v) for k, v in fd.function_calls_map.items()},
+        "function_call_lines_map": fd.function_call_lines_map,
         "blocking_calls_in_functions": fd.blocking_calls_in_functions,
         "function_def_count": fd.function_def_count,
         "class_def_count": fd.class_def_count,
@@ -1215,6 +1216,7 @@ def _deserialize_file_data(d: dict) -> FileData:
         abstract_classes=set(d.get("abstract_classes", [])),
         async_functions=set(d.get("async_functions", [])),
         function_calls_map={k: set(v) for k, v in d.get("function_calls_map", {}).items()},
+        function_call_lines_map=d.get("function_call_lines_map", {}),
         blocking_calls_in_functions={
             k: [tuple(x) for x in v]
             for k, v in d.get("blocking_calls_in_functions", {}).items()
@@ -1925,10 +1927,13 @@ class FileData:
     async_functions: set[str] = field(default_factory=set)  # async def names
     function_calls_map: dict[str, set[str]] = field(
         default_factory=dict
-    )  # func_name -> set of callee names
+    )  # qualified_func_name -> set of callee qualified names
+    function_call_lines_map: dict[str, dict[str, int]] = field(
+        default_factory=dict
+    )  # qualified_func_name -> {qualified_callee -> call-site line number}
     blocking_calls_in_functions: dict[str, list[tuple[str, str]]] = field(
         default_factory=dict
-    )  # func_name -> [(blocking_key, display_name)]
+    )  # qualified_func_name -> [(blocking_key, display_name)]
     # --- SC509 lazy module detection ---
     function_def_count: int = 0  # top-level function defs (not methods)
     class_def_count: int = 0  # top-level class defs
@@ -3093,30 +3098,48 @@ class SmellDetector(ast.NodeVisitor):
 
     def _collect_defined_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef):
         """Track function definitions for shotgun surgery detection."""
+        # Skip nested functions: they are not independently callable from outside
+        # and their blocking calls are NOT indirect blocking via a sync helper.
+        if len(self._func_stack) > 1:
+            return
         self.file_data.defined_functions.add(node.name)
         if isinstance(node, ast.AsyncFunctionDef):
             self.file_data.async_functions.add(node.name)
 
     def _collect_called_functions(self, node: ast.FunctionDef | ast.AsyncFunctionDef):
         """Track function calls for shotgun surgery, RFC, and call-chain detection."""
+        # Skip nested functions: their calls are attributed to the outer scope's
+        # per-file check, not to the cross-file call-chain tracer.
+        if len(self._func_stack) > 1:
+            return
+        module_stem = Path(self.filepath).stem
+        qname = f"{module_stem}:{node.name}"
         callees: set[str] = set()
+        call_lines: dict[str, int] = {}  # bare callee name -> first call-site line
         blocking: list[tuple[str, str]] = []
-        for child in ast.walk(node):
+        for child in _walk_skip_nested_scopes(node):
             if isinstance(child, ast.Call):
                 if isinstance(child.func, ast.Name):
-                    self.file_data.called_functions.add(child.func.id)
-                    callees.add(child.func.id)
+                    callee_bare = child.func.id
+                    self.file_data.called_functions.add(callee_bare)
+                    callees.add(callee_bare)
+                    if callee_bare not in call_lines:
+                        call_lines[callee_bare] = child.lineno
                 elif isinstance(child.func, ast.Attribute):
-                    self.file_data.called_functions.add(child.func.attr)
-                    callees.add(child.func.attr)
+                    callee_bare = child.func.attr
+                    self.file_data.called_functions.add(callee_bare)
+                    callees.add(callee_bare)
+                    if callee_bare not in call_lines:
+                        call_lines[callee_bare] = child.lineno
                 # Track blocking calls within this function
                 key = _get_blocking_call_key(child)
                 if key is not None:
                     display, _alt = _BLOCKING_CALLS[key]
                     blocking.append((key, display))
-        self.file_data.function_calls_map[node.name] = callees
+        self.file_data.function_calls_map[qname] = callees
+        self.file_data.function_call_lines_map[qname] = call_lines
         if blocking:
-            self.file_data.blocking_calls_in_functions[node.name] = blocking
+            self.file_data.blocking_calls_in_functions[qname] = blocking
 
     def _collect_class_info(self, node: ast.ClassDef):
         """Collect detailed class information for Tier 2/3 analysis."""
@@ -4314,89 +4337,101 @@ def _detect_indirect_blocking(all_data: list[FileData]) -> list[Finding]:
     """
     findings: list[Finding] = []
 
-    # Build global maps: func_name -> file, func_name -> callees, func_name -> blocking
-    # When the same function name is defined in multiple files, track all locations.
-    func_to_file: dict[str, list[str]] = defaultdict(list)
-    func_callees: dict[str, set[str]] = {}
-    func_blocking: dict[str, list[tuple[str, str]]] = {}
-    async_funcs: dict[str, str] = {}  # async_func_name -> filepath
+    # Build global maps keyed by qualified name (``module_stem:func_name``).
+    # Bare-name sets (async_funcs, bare_defined) are kept for fast membership
+    # checks where module resolution is not needed.
+    func_callees: dict[str, set[str]] = {}   # qname -> set of bare callee names
+    func_blocking: dict[str, list[tuple[str, str]]] = {}  # qname -> [(key, display)]
+    func_call_lines: dict[str, dict[str, int]] = {}  # qname -> {bare_callee -> line}
+    # bare name -> list of qnames that define it (for resolving callees)
+    bare_to_qnames: dict[str, list[str]] = defaultdict(list)
+    # bare async func name -> filepath (for async-skip check)
+    async_funcs_bare: dict[str, str] = {}
+    # qname -> filepath
+    qname_to_file: dict[str, str] = {}
 
     for fd in all_data:
+        stem = Path(fd.filepath).stem
         for fname in fd.defined_functions:
-            func_to_file[fname].append(fd.filepath)
-        for fname, callees in fd.function_calls_map.items():
-            func_callees[fname] = callees
-        for fname, blockers in fd.blocking_calls_in_functions.items():
-            func_blocking[fname] = blockers
+            qn = f"{stem}:{fname}"
+            bare_to_qnames[fname].append(qn)
+            qname_to_file[qn] = fd.filepath
+        for qname, callees in fd.function_calls_map.items():
+            func_callees[qname] = callees
+        for qname, blockers in fd.blocking_calls_in_functions.items():
+            func_blocking[qname] = blockers
+        for qname, lines in fd.function_call_lines_map.items():
+            func_call_lines[qname] = lines
         for fname in fd.async_functions:
-            async_funcs[fname] = fd.filepath
+            async_funcs_bare[fname] = fd.filepath
 
     def _trace_blocking(
-        func_name: str, depth: int, visited: set[str]
+        qname: str, depth: int, visited: set[str]
     ) -> list[str] | None:
         """Trace transitive callees looking for a blocking call.
 
-        Returns the chain ``[func_name, ..., blocking_display]`` on hit,
+        Returns the chain ``[bare_func_name, ..., blocking_display]`` on hit,
         or ``None`` if the chain is clean.
         """
         if depth > _MAX_CALL_CHAIN_DEPTH:
             return None
-        if func_name in visited:
+        if qname in visited:
             return None  # cycle
-        visited.add(func_name)
+        visited.add(qname)
+
+        bare = qname.split(":", 1)[1]
 
         # Check if this function directly contains a blocking call
-        if func_name in func_blocking:
-            _key, display = func_blocking[func_name][0]
-            return [func_name, display]
+        if qname in func_blocking:
+            _key, display = func_blocking[qname][0]
+            return [bare, display]
 
-        # Recurse into callees
-        callees = func_callees.get(func_name, set())
-        for callee in callees:
+        # Recurse into callees (bare names resolved to qnames)
+        for callee_bare in func_callees.get(qname, set()):
             # Skip if callee is async (it's awaited, not blocking)
-            if callee in async_funcs:
+            if callee_bare in async_funcs_bare:
                 continue
-            chain = _trace_blocking(callee, depth + 1, visited.copy())
-            if chain is not None:
-                return [func_name] + chain
+            # Resolve bare callee to all matching qnames
+            for callee_qname in bare_to_qnames.get(callee_bare, []):
+                chain = _trace_blocking(callee_qname, depth + 1, visited.copy())
+                if chain is not None:
+                    return [bare] + chain
 
         return None
 
     # For each async function, check its direct sync callees
     for fd in all_data:
+        stem = Path(fd.filepath).stem
         for fname in fd.async_functions:
-            callees = fd.function_calls_map.get(fname, set())
-            for callee in callees:
+            async_qname = f"{stem}:{fname}"
+            callees = func_callees.get(async_qname, set())
+            call_lines = func_call_lines.get(async_qname, {})
+            for callee_bare in callees:
                 # Skip async callees
-                if callee in async_funcs:
+                if callee_bare in async_funcs_bare:
                     continue
-                # Skip if callee is not a defined function (built-in, etc.)
-                if callee not in func_to_file:
+                # Skip if callee is not a known defined function (built-in, etc.)
+                if callee_bare not in bare_to_qnames:
                     continue
-                # Skip if the callee is in the same function (direct blocking
-                # is already caught by per-file SC703)
-                if callee in func_blocking:
-                    # Direct blocking in a function called from async --
-                    # only flag if the callee is in a DIFFERENT file
-                    callee_files = func_to_file.get(callee, [])
-                    if fd.filepath in callee_files and len(callee_files) == 1:
-                        continue
-                # Trace the call chain
-                chain = _trace_blocking(callee, 1, set())
-                if chain is not None:
-                    chain_str = " -> ".join([fname] + chain)
-                    findings.append(
-                        _make_finding(
-                            file=fd.filepath,
-                            line=1,
-                            pattern="SC703",
-                            name="Avoid Blocking Calls in Async Functions",
-                            severity="warning",
-                            message=f"Indirect blocking call chain: `{chain_str}` "
-                            f"-- sync helper called from async function contains blocking I/O",
-                            category="idioms",
+                # Trace the call chain through all matching definitions
+                for callee_qname in bare_to_qnames[callee_bare]:
+                    chain = _trace_blocking(callee_qname, 1, set())
+                    if chain is not None:
+                        chain_str = " -> ".join([fname] + chain)
+                        call_line = call_lines.get(callee_bare, 1)
+                        findings.append(
+                            _make_finding(
+                                file=fd.filepath,
+                                line=call_line,
+                                pattern="SC703",
+                                name="Avoid Blocking Calls in Async Functions",
+                                severity="warning",
+                                message=f"Indirect blocking call chain: `{chain_str}` "
+                                f"-- sync helper called from async function contains blocking I/O",
+                                category="idioms",
+                            )
                         )
-                    )
+                        break  # one finding per callee is enough
 
     return findings
 
@@ -4506,12 +4541,14 @@ def scan_path(target: Path) -> list[Finding]:
     if len(all_file_data) > 1:
         all_findings.extend(cross_file_analysis(all_file_data))
     elif len(all_file_data) == 1:
-        # Single-file scan: still compute per-class metrics (LCOM, CBO, RFC, MID) and lazy-module detection
+        # Single-file scan: still compute per-class metrics (LCOM, CBO, RFC, MID),
+        # lazy-module detection, and indirect blocking (same-file sync helpers).
         all_findings.extend(_detect_low_cohesion(all_file_data))
         all_findings.extend(_detect_high_coupling(all_file_data))
         all_findings.extend(_detect_high_rfc(all_file_data))
         all_findings.extend(_detect_middle_man(all_file_data))
         all_findings.extend(_detect_lazy_modules(all_file_data))
+        all_findings.extend(_detect_indirect_blocking(all_file_data))
 
     # SC706: conflicting concurrency libraries (project-level check)
     if target.is_dir():
