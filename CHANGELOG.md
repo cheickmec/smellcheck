@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/cheickmec/smellcheck/compare/v0.3.10...v0.4.0) (2026-11-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* smellcheck now requires Python 3.12+.
+
+### Features
+
+* require Python 3.12 or newer ([083762a](https://github.com/cheickmec/smellcheck/commit/083762a87165b98d9ad01f4f05f4ee4a7849214f))
+
 ## [0.3.10](https://github.com/cheickmec/smellcheck/compare/v0.3.9...v0.3.10) (2026-03-25)
 
 
