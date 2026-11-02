@@ -21,7 +21,7 @@
 
 **smellcheck** is a Python code smell detector and refactoring catalog. It works as a pip-installable CLI, GitHub Action, pre-commit hook, or [Agent Skills](https://agentskills.io) plugin for AI coding assistants.
 
-**No dependencies.** Pure Python stdlib (`ast`, `pathlib`, `json`). Runs anywhere Python 3.10+ runs.
+**No dependencies.** Pure Python stdlib (`ast`, `pathlib`, `json`). Runs anywhere Python 3.12+ runs.
 
 > **What are code smells?** Code smells are surface-level patterns in source code that hint at deeper design problems — not bugs, but structural weaknesses that make code harder to maintain, extend, or understand. [Learn more →](https://github.com/cheickmec/smellcheck/blob/main/docs/code-smells-guide.md)
 
@@ -303,7 +303,7 @@ cache-dir = ".smellcheck-cache"  # custom cache directory
 
 - **60 automated smell checks** -- per-file AST analysis, cross-file dependency analysis, and OO metrics
 - **83 refactoring patterns** -- numbered catalog with before/after examples, trade-offs, and severity levels
-- **Zero dependencies** -- stdlib-only, runs on any Python 3.10+ installation
+- **Zero dependencies** -- stdlib-only, runs on any Python 3.12+ installation
 - **Multiple output formats** -- text (terminal), JSON (machine-readable), GitHub annotations (CI), SARIF 2.1.0 (Code Scanning), JUnit XML (Jenkins/GitLab/CircleCI), GitLab CodeClimate (MR quality widget)
 - **Configurable** -- pyproject.toml config, inline suppression, CLI overrides
 - **Baseline support** -- adopt incrementally by suppressing existing findings and only failing on new ones
