@@ -369,11 +369,7 @@ def test_is_elif_module_level(tmp_path):
 # --- Regression #79: missing ast.TryStar ---
 
 def test_dead_code_after_return_in_try_star(tmp_path):
-    """SC401 should detect dead code inside ``try/except*`` blocks (Python 3.11+)."""
-    import sys
-    if sys.version_info < (3, 11):
-        pytest.skip("ast.TryStar requires Python 3.11+")
-    # Use exec to avoid SyntaxError on Python < 3.11
+    """SC401 should detect dead code inside ``try/except*`` blocks."""
     code = (
         "def foo():\n"
         "    try:\n"

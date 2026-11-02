@@ -73,7 +73,7 @@ Configurable thresholds live at the top of `detector.py` as `Final` constants. I
 ## Code style
 
 - **Zero dependencies.** Do not add imports beyond Python stdlib. This is a hard rule.
-- **Python 3.10+.** Use `|` unions, pattern matching, modern features.
+- **Python 3.12+.** Use `|` unions, pattern matching, modern features.
 - **Type hints** on all public functions.
 - No linter is configured in the repo yet, but keep style consistent with the existing code.
 

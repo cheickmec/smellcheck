@@ -62,7 +62,7 @@ if __name__ == "__main__":
         print(
             "smellcheck is not available.\n"
             "\n"
-            "Install it (zero dependencies, Python 3.10+):\n"
+            "Install it (zero dependencies, Python 3.12+):\n"
             f"  {sys.executable} -m pip install smellcheck\n",
             file=sys.stderr,
         )
