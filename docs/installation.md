@@ -36,6 +36,8 @@ repos:
         args: ['--fail-on', 'warning']
 ```
 
+The published hook sets `require_serial: true`. Cross-file checks such as cyclic imports need every selected file in one process. pre-commit can still split an exceptionally large argument list into batches; for a reliable full-project result, run `smellcheck` on the tree directly.
+
 ### SARIF / Code Scanning
 
 Upload smellcheck findings to GitHub Code Scanning so they appear as native alerts in the Security tab and as PR annotations:

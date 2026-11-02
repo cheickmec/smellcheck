@@ -4,4 +4,4 @@
   entry: smellcheck
   language: python
   types: [python]
-  require_serial: false
+  require_serial: true

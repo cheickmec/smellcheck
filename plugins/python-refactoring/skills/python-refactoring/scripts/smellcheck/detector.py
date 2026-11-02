@@ -16,17 +16,19 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import io
 import json
 import os
 import re
 import subprocess
 import sys
 import textwrap
+import tokenize
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Final
+from typing import Callable, Final, Iterator
 
 # ---------------------------------------------------------------------------
 # Finding data model
@@ -746,6 +748,30 @@ class Finding:
         return SEVERITY_ORDER.get(self.severity, 0)
 
 
+@dataclass(frozen=True)
+class AnalysisFailure:
+    """A source file that could not be analyzed.
+
+    Analysis failures are not smell findings. A scan that only fails to
+    parse or read a file must not look like a clean run with no smells.
+
+    Attributes:
+        file: Path of the file that failed, as passed to the scanner.
+        kind: Failure category: ``syntax``, ``decode``, ``permission``, or ``os``.
+        message: Filename-specific diagnostic suitable for stderr.
+    """
+
+    file: str
+    kind: str
+    message: str
+
+
+# Exit status: 1 means findings at or above ``--fail-on``. Analysis
+# failures use a distinct code so they do not collide with that contract.
+_EXIT_FINDINGS: Final = 1
+_EXIT_ANALYSIS_ERROR: Final = 2
+
+
 # ---------------------------------------------------------------------------
 # ClassInfo: per-class metadata for OO metrics (Tier 2/3)
 # ---------------------------------------------------------------------------
@@ -1054,16 +1080,50 @@ def _resolve_extends(
 # ---------------------------------------------------------------------------
 
 _DEFAULT_CACHE_DIR: Final = ".smellcheck-cache"
-_CACHE_VERSION: Final = 3
+_CACHE_VERSION: Final = 5
 
 
-def _cache_key(source: str, config_hash: str, version: str) -> str:
-    """Cache key combining content hash, config hash, and tool version.
+def _cache_file_id(path: Path) -> str:
+    """Return the normalized identity of a scanned file.
+
+    Filename-dependent checks (for example ``__init__.py``) must not share
+    a cache entry with a different file that happens to have the same source.
+
+    Args:
+        path: File path about to be analyzed.
+
+    Returns:
+        Resolved POSIX path, or the original POSIX path if resolution fails.
+    """
+    try:
+        return path.resolve().as_posix()
+    except OSError:
+        return path.as_posix()
+
+
+def _cache_key(
+    source: str,
+    config_hash: str,
+    version: str,
+    file_id: str = "",
+) -> str:
+    """Cache key combining file identity, content, config, and version.
 
     The compound key is hashed to guarantee a safe filename (hex only,
-    no path separators regardless of what *version* contains).
+    no path separators regardless of what *version* or *file_id* contains).
+
+    Args:
+        source: File text that was analyzed.
+        config_hash: Hash of options that change analysis.
+        version: smellcheck version string.
+        file_id: Normalized path of the file. Identical contents at two
+            paths do not share an entry.
+
+    Returns:
+        Hex digest used as the cache filename.
     """
-    raw = f"{hashlib.sha256(source.encode('utf-8')).hexdigest()}_{config_hash}_{version}"
+    content = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    raw = f"{file_id}\0{content}_{config_hash}_{version}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -1180,6 +1240,17 @@ def _serialize_file_data(fd: FileData) -> dict:
         "called_functions": sorted(fd.called_functions),
         "abstract_classes": sorted(fd.abstract_classes),
         "async_functions": sorted(fd.async_functions),
+        "module_level_functions": sorted(fd.module_level_functions),
+        "async_module_functions": sorted(fd.async_module_functions),
+        "async_methods": sorted(fd.async_methods),
+        "import_bindings": {
+            name: [level, module, func]
+            for name, (level, module, func) in fd.import_bindings.items()
+        },
+        "function_call_sites": {
+            key: [list(site) for site in sites]
+            for key, sites in fd.function_call_sites.items()
+        },
         "function_calls_map": {k: sorted(v) for k, v in fd.function_calls_map.items()},
         "function_call_lines_map": fd.function_call_lines_map,
         "blocking_calls_in_functions": fd.blocking_calls_in_functions,
@@ -1193,13 +1264,56 @@ def _serialize_file_data(fd: FileData) -> dict:
     }
 
 
+def _coerce_import_bindings(raw: object) -> dict[str, tuple[int, str, str]]:
+    """Restore import bindings from a cache payload.
+
+    Args:
+        raw: JSON object mapping local names to ``[level, module, func]``.
+
+    Returns:
+        Binding map. Invalid entries are dropped.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    bindings: dict[str, tuple[int, str, str]] = {}
+    for name, value in raw.items():
+        if isinstance(value, (list, tuple)) and len(value) == 3:
+            level, module, func = value
+            bindings[str(name)] = (int(level), str(module), str(func))
+    return bindings
+
+
+def _coerce_call_sites(raw: object) -> dict[str, list[tuple[str, str, str, int]]]:
+    """Restore structured call sites from a cache payload.
+
+    Args:
+        raw: JSON object mapping function keys to call-site lists.
+
+    Returns:
+        Call sites as ``(kind, name, receiver, line)`` tuples.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    sites: dict[str, list[tuple[str, str, str, int]]] = {}
+    for key, values in raw.items():
+        parsed: list[tuple[str, str, str, int]] = []
+        if not isinstance(values, list):
+            continue
+        for site in values:
+            if isinstance(site, (list, tuple)) and len(site) == 4:
+                kind, name, receiver, line = site
+                parsed.append((str(kind), str(name), str(receiver), int(line)))
+        sites[str(key)] = parsed
+    return sites
+
+
 def _deserialize_file_data(d: dict) -> FileData:
     """Restore a FileData from a cached dict."""
     return FileData(
         filepath=d["filepath"],
         toplevel_defs=d.get("toplevel_defs", 0),
         total_lines=d.get("total_lines", 0),
-        imports=d.get("imports", []),
+        imports=_coerce_imports(d.get("imports", [])),
         func_signatures=[tuple(t) for t in d.get("func_signatures", [])],
         method_external_accesses=[
             (m, line, cls, acc)
@@ -1215,6 +1329,11 @@ def _deserialize_file_data(d: dict) -> FileData:
         called_functions=set(d.get("called_functions", [])),
         abstract_classes=set(d.get("abstract_classes", [])),
         async_functions=set(d.get("async_functions", [])),
+        module_level_functions=set(d.get("module_level_functions", [])),
+        async_module_functions=set(d.get("async_module_functions", [])),
+        async_methods=set(d.get("async_methods", [])),
+        import_bindings=_coerce_import_bindings(d.get("import_bindings", {})),
+        function_call_sites=_coerce_call_sites(d.get("function_call_sites", {})),
         function_calls_map={k: set(v) for k, v in d.get("function_calls_map", {}).items()},
         function_call_lines_map=d.get("function_call_lines_map", {}),
         blocking_calls_in_functions={
@@ -1288,6 +1407,51 @@ def _clear_cache(cache_dir: Path) -> int:
                 except OSError:
                     pass
     return removed
+
+
+def _retarget_findings(findings: list[Finding], filepath: str) -> list[Finding]:
+    """Point cached findings at the file currently being scanned.
+
+    Args:
+        findings: Findings loaded from a cache entry.
+        filepath: Path string of the file this entry belongs to.
+
+    Returns:
+        Findings whose ``file`` field is *filepath*.
+    """
+    retargeted: list[Finding] = []
+    for finding in findings:
+        if finding.file == filepath:
+            retargeted.append(finding)
+        else:
+            retargeted.append(replace(finding, file=filepath))
+    return retargeted
+
+
+def _retarget_file_data(file_data: FileData, filepath: str) -> FileData:
+    """Point cached file metadata at the file currently being scanned.
+
+    Args:
+        file_data: Metadata loaded from a cache entry.
+        filepath: Path string of the file this entry belongs to.
+
+    Returns:
+        The same metadata with filepath fields rewritten when they referred
+        to the cached path.
+    """
+    old = file_data.filepath
+    if old == filepath and all(info.filepath == filepath for info in file_data.class_info):
+        return file_data
+    file_data.filepath = filepath
+    file_data.class_info = [
+        replace(info, filepath=filepath) if info.filepath == old else info
+        for info in file_data.class_info
+    ]
+    file_data.func_signatures = [
+        (filepath, *sig[1:]) if sig and sig[0] == old else sig
+        for sig in file_data.func_signatures
+    ]
+    return file_data
 
 
 # ---------------------------------------------------------------------------
@@ -1408,15 +1572,47 @@ def _resolve_code(code: str) -> set[str]:
     return set()
 
 
+def _comment_map(source_lines: list[str]) -> dict[int, str]:
+    """Map 1-based line numbers to real comment text.
+
+    Hash characters inside strings and docstrings are not comments.
+    A tokenize error keeps comments already seen and does not fall back
+    to scanning raw source lines.
+
+    Args:
+        source_lines: Source split into lines without terminators.
+
+    Returns:
+        Line number to the comment token text on that line, including ``#``.
+    """
+    if not source_lines:
+        return {}
+    source = "\n".join(source_lines)
+    if not source.endswith("\n"):
+        source += "\n"
+    comments: dict[int, list[str]] = defaultdict(list)
+    try:
+        reader = io.StringIO(source).readline
+        for tok in tokenize.generate_tokens(reader):
+            if tok.type == tokenize.COMMENT:
+                comments[tok.start[0]].append(tok.string)
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass
+    return {line: " ".join(parts) for line, parts in comments.items()}
+
+
 def _noqa_suppressed(source_lines: list[str], line: int, pattern: str) -> bool:
     """Return True if *line* (1-based) has a ``# noqa`` that covers *pattern*.
 
     ``# noqa`` alone suppresses everything.
     ``# noqa: SC701,SC601`` suppresses only the listed codes.
+    Only real comments count; the same text inside a string does not.
     """
     if line < 1 or line > len(source_lines):
         return False
-    text = source_lines[line - 1]
+    text = _comment_map(source_lines).get(line, "")
+    if not text:
+        return False
     m = _NOQA_RE.search(text)
     if m is None:
         return False
@@ -1434,9 +1630,9 @@ def _noqa_suppressed(source_lines: list[str], line: int, pattern: str) -> bool:
 # Block-level suppression (# smellcheck: disable/enable)
 # ---------------------------------------------------------------------------
 
-# Matches: # smellcheck: disable SC701, SC301
-#          # smellcheck: enable-all
-#          # smellcheck: disable-file SC301
+# Matches a smellcheck directive: disable, enable, disable-all,
+# enable-all, or disable-file, optionally followed by SC codes.
+# Examples live in strings below so this file does not suppress itself.
 _DIRECTIVE_RE = re.compile(
     r"#\s*smellcheck\s*:\s*(disable-file|disable-all|enable-all|disable|enable)"
     r"(?:\s+((?:[A-Za-z0-9_]+\s*,\s*)*[A-Za-z0-9_]+))?",
@@ -1466,7 +1662,11 @@ def _parse_block_directives(
     disable_all_file = False
     file_disabled_codes: set[str] = set()
 
-    for idx, text in enumerate(source_lines, start=1):
+    comments = _comment_map(source_lines)
+    for idx in range(1, total + 1):
+        text = comments.get(idx, "")
+        if not text:
+            continue
         m = _DIRECTIVE_RE.search(text)
         if m is None:
             continue
@@ -1656,6 +1856,222 @@ def _walk_skip_nested_scopes(node: ast.AST):
         yield from _walk_skip_nested_scopes(child)
 
 
+_NESTED_SCOPE: Final = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+_COMP_NODES: Final = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _target_name_ids(target: ast.AST) -> set[str]:
+    """Collect names stored by an assignment or comprehension target.
+
+    Args:
+        target: AST node used as a store target.
+
+    Returns:
+        Bound name strings. Empty when the target is not a name pattern.
+    """
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, ast.Starred):
+        return _target_name_ids(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: set[str] = set()
+        for elt in target.elts:
+            names.update(_target_name_ids(elt))
+        return names
+    return set()
+
+
+def _function_parameters(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> set[str]:
+    """Return every parameter name, including ``*args`` and ``**kwargs``.
+
+    Args:
+        node: Function or lambda whose signature is inspected.
+
+    Returns:
+        Parameter names bound by the signature.
+    """
+    args = node.args
+    names = {arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+    if args.vararg is not None:
+        names.add(args.vararg.arg)
+    if args.kwarg is not None:
+        names.add(args.kwarg.arg)
+    return names
+
+
+def _stop_at_nested(node: ast.AST, visitor: Callable[[ast.AST], None]) -> None:
+    """Walk *node* but not nested functions, lambdas, classes, or comprehensions.
+
+    Args:
+        node: Scope whose immediate bindings are collected.
+        visitor: Callback invoked for each node that belongs to this scope.
+    """
+    def walk(current: ast.AST) -> None:
+        if current is not node and isinstance(current, _NESTED_SCOPE):
+            return
+        if current is not node and isinstance(current, _COMP_NODES):
+            for inner in ast.walk(current):
+                if isinstance(inner, ast.NamedExpr):
+                    visitor(inner)
+            return
+        visitor(current)
+        for child in ast.iter_child_nodes(current):
+            walk(child)
+    walk(node)
+
+
+def _names_bound_here(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> set[str]:
+    """Names assigned in this function, ignoring nested scopes.
+
+    ``nonlocal`` and ``global`` names are not local bindings, so a nested
+    function can still capture them.
+
+    Args:
+        node: Function or lambda scope.
+
+    Returns:
+        Names that shadow enclosing scopes inside *node*.
+    """
+    bound = _function_parameters(node)
+    skipped: set[str] = set()
+
+    def visit(current: ast.AST) -> None:
+        if isinstance(current, (ast.Global, ast.Nonlocal)):
+            skipped.update(current.names)
+        elif isinstance(current, ast.Name) and isinstance(current.ctx, (ast.Store, ast.Del)):
+            bound.add(current.id)
+        elif isinstance(current, ast.ExceptHandler) and isinstance(current.name, str):
+            bound.add(current.name)
+        elif isinstance(current, (ast.Import, ast.ImportFrom)):
+            for alias in current.names:
+                if alias.name == "*":
+                    continue
+                bound.add(alias.asname or alias.name.split(".")[0])
+
+    _stop_at_nested(node, visit)
+    return bound - skipped
+
+
+def _walk_comprehension(
+    generators: list[ast.comprehension],
+    elts: list[ast.AST],
+    shadowed: set[str],
+    walk: Callable[[ast.AST, set[str]], None],
+) -> None:
+    """Visit a comprehension with iteration targets shadowing enclosing names.
+
+    The first iterable is evaluated in the enclosing scope. Later iterables,
+    filters, and elements see the comprehension targets.
+
+    Args:
+        generators: Comprehension ``for`` clauses, in source order.
+        elts: Element expressions evaluated inside the comprehension.
+        shadowed: Names already bound in an enclosing function.
+        walk: Visitor ``(node, shadowed_names)``.
+    """
+    if generators:
+        walk(generators[0].iter, shadowed)
+    comp_bound: set[str] = set()
+    for gen in generators:
+        comp_bound.update(_target_name_ids(gen.target))
+    inner = shadowed | comp_bound
+    for gen in generators[1:]:
+        walk(gen.iter, inner)
+    for gen in generators:
+        for test in gen.ifs:
+            walk(test, inner)
+    for elt in elts:
+        walk(elt, inner)
+
+
+def _note_signature_uses(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda,
+    shadowed: set[str],
+    walk: Callable[[ast.AST, set[str]], None],
+) -> None:
+    """Record names used by defaults, decorators, and annotations.
+
+    Those expressions run in the enclosing scope, not inside the function.
+
+    Args:
+        node: Nested function or lambda being defined.
+        shadowed: Names bound outside this definition.
+        walk: Visitor ``(node, shadowed_names)``.
+    """
+    args = node.args
+    for default in (*args.defaults, *(item for item in args.kw_defaults if item is not None)):
+        walk(default, shadowed)
+    for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+        if arg.annotation is not None:
+            walk(arg.annotation, shadowed)
+    if args.vararg is not None and args.vararg.annotation is not None:
+        walk(args.vararg.annotation, shadowed)
+    if args.kwarg is not None and args.kwarg.annotation is not None:
+        walk(args.kwarg.annotation, shadowed)
+    returns = getattr(node, "returns", None)
+    if returns is not None:
+        walk(returns, shadowed)
+    for deco in getattr(node, "decorator_list", ()):
+        walk(deco, shadowed)
+
+
+def _names_used_in_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """Names referenced by a function, including closures and lambdas.
+
+    A nested function contributes a name only when that name is free there.
+    A nested parameter or assignment shadows the outer name, so it is not a use.
+    Comprehension targets are treated the same way.
+
+    Args:
+        node: Function whose parameters may be captured by nested scopes.
+
+    Returns:
+        Names that count as uses of this function's own scope.
+    """
+    used: set[str] = set()
+
+    def walk(current: ast.AST, shadowed: set[str]) -> None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            _note_signature_uses(current, shadowed, walk)
+            inner = shadowed | _names_bound_here(current)
+            body: list[ast.AST]
+            if isinstance(current, ast.Lambda):
+                body = [current.body]
+            else:
+                body = list(current.body)
+            for stmt in body:
+                walk(stmt, inner)
+            return
+        if isinstance(current, ast.ClassDef):
+            for deco in current.decorator_list:
+                walk(deco, shadowed)
+            for base in current.bases:
+                walk(base, shadowed)
+            for keyword in current.keywords:
+                walk(keyword.value, shadowed)
+            for stmt in current.body:
+                walk(stmt, shadowed)
+            return
+        if isinstance(current, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            _walk_comprehension(current.generators, [current.elt], shadowed, walk)
+            return
+        if isinstance(current, ast.DictComp):
+            _walk_comprehension(current.generators, [current.key, current.value], shadowed, walk)
+            return
+        if isinstance(current, ast.Name) and current.id not in shadowed:
+            used.add(current.id)
+            return
+        if isinstance(current, ast.ExceptHandler) and isinstance(current.name, str):
+            if current.name not in shadowed:
+                used.add(current.name)
+        for child in ast.iter_child_nodes(current):
+            walk(child, shadowed)
+
+    for stmt in node.body:
+        walk(stmt, set())
+    return used
+
+
 def _is_to_thread_call(node: ast.Call) -> bool:
     """Return True if *node* is ``asyncio.to_thread(...)``."""
     func = node.func
@@ -1818,29 +2234,123 @@ def _normalize_ast(node: ast.AST) -> str:
     return "|".join(parts)
 
 
-def _extract_imports(tree: ast.Module) -> list[str]:
-    """Extract all imported module names from a module's AST.
+def _iter_module_imports(node: ast.AST) -> Iterator[ast.Import | ast.ImportFrom]:
+    """Yield import statements that run at module import time.
 
-    Returns both the full dotted path and all intermediate segments so that
-    cross-file matching works for both package-style imports (``from pkg.sub import x``)
-    and flat single-file imports (``import utils``).
+    Imports nested inside functions, lambdas, or classes are skipped.
+    Imports inside ``if`` and ``try`` still count.
+
+    Args:
+        node: AST node to walk.
+
+    Yields:
+        ``Import`` and ``ImportFrom`` nodes.
     """
-    imports: list[str] = []
-    for node in ast.walk(tree):
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        if isinstance(child, (ast.Import, ast.ImportFrom)):
+            yield child
+        else:
+            yield from _iter_module_imports(child)
+
+
+def _coerce_imports(raw: object) -> list[tuple[int, str, tuple[str, ...]]]:
+    """Normalize stored imports to ``(level, module, names)`` triples.
+
+    Args:
+        raw: Import list from a scan or a deserialized cache entry.
+
+    Returns:
+        Absolute and relative imports. Legacy bare strings are treated as
+        absolute module names.
+    """
+    if not isinstance(raw, list):
+        return []
+    refs: list[tuple[int, str, tuple[str, ...]]] = []
+    for item in raw:
+        if isinstance(item, str):
+            refs.append((0, item, ()))
+            continue
+        if not isinstance(item, (list, tuple)) or len(item) != 3:
+            continue
+        level, module, names = item
+        name_tuple = tuple(str(name) for name in names) if isinstance(names, (list, tuple)) else ()
+        refs.append((int(level), str(module), name_tuple))
+    return refs
+
+
+def _extract_imports(tree: ast.Module) -> list[tuple[int, str, tuple[str, ...]]]:
+    """Extract module-level imports without stripping them to basenames.
+
+    Each record keeps the relative level, the dotted module, and imported
+    names that might themselves be submodules. ``from . import b`` is kept
+    even though its module attribute is empty.
+
+    Args:
+        tree: Parsed module.
+
+    Returns:
+        Import triples ``(level, module, names)``.
+    """
+    refs: list[tuple[int, str, tuple[str, ...]]] = []
+    for node in _iter_module_imports(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                # "import pkg_a.a" → ["pkg_a", "a", "pkg_a.a"]
-                parts = alias.name.split(".")
-                imports.extend(parts)
-                if len(parts) > 1:
-                    imports.append(alias.name)
-        elif isinstance(node, ast.ImportFrom):
-            if node.module:
-                parts = node.module.split(".")
-                imports.extend(parts)
-                if len(parts) > 1:
-                    imports.append(node.module)
-    return imports
+                refs.append((0, alias.name, ()))
+            continue
+        names = tuple(alias.name for alias in node.names if alias.name != "*")
+        refs.append((node.level or 0, node.module or "", names))
+    return refs
+
+
+
+
+def _remember_import_binding(
+    bindings: dict[str, tuple[int, str, str]], node: ast.Import | ast.ImportFrom
+) -> None:
+    """Record local names introduced by one import statement.
+
+    Args:
+        bindings: Map updated in place.
+        node: Import or from-import node.
+    """
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if alias.asname:
+                bindings[alias.asname] = (0, alias.name, "")
+            else:
+                root = alias.name.split(".")[0]
+                bindings[root] = (0, root, "")
+        return
+    module = node.module or ""
+    level = node.level or 0
+    for alias in node.names:
+        if alias.name == "*":
+            continue
+        local = alias.asname or alias.name
+        bindings[local] = (level, module, alias.name)
+
+
+def _extract_import_bindings(tree: ast.Module) -> dict[str, tuple[int, str, str]]:
+    """Map local names to the module and function they refer to.
+
+    Module-level imports override function-local imports of the same name.
+    An empty function name means the local name refers to a module.
+
+    Args:
+        tree: Parsed module.
+
+    Returns:
+        ``local name -> (level, module, function)``.
+    """
+    bindings: dict[str, tuple[int, str, str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            _remember_import_binding(bindings, node)
+    for node in _iter_module_imports(tree):
+        _remember_import_binding(bindings, node)
+    return bindings
 
 
 def _is_stub_body(body: list[ast.stmt]) -> bool:
@@ -1901,7 +2411,7 @@ class FileData:
     filepath: str
     toplevel_defs: int = 0
     total_lines: int = 0
-    imports: list[str] = field(default_factory=list)
+    imports: list[tuple[int, str, tuple[str, ...]]] = field(default_factory=list)
     # func_key -> (filepath, func_name, line, normalized_hash, line_count)
     func_signatures: list[tuple[str, str, int, str, int]] = field(default_factory=list)
     # method -> {external_class: count}
@@ -1925,6 +2435,15 @@ class FileData:
     )  # classes with ABC or abstract methods
     # --- SC703 cross-file call-chain tracing ---
     async_functions: set[str] = field(default_factory=set)  # async def names
+    module_level_functions: set[str] = field(default_factory=set)
+    async_module_functions: set[str] = field(default_factory=set)
+    async_methods: set[str] = field(default_factory=set)
+    # local name -> (level, module, imported function or "")
+    import_bindings: dict[str, tuple[int, str, str]] = field(default_factory=dict)
+    # qualified name -> [(kind, name, receiver, line)]
+    function_call_sites: dict[str, list[tuple[str, str, str, int]]] = field(
+        default_factory=dict
+    )
     function_calls_map: dict[str, set[str]] = field(
         default_factory=dict
     )  # qualified_func_name -> set of callee qualified names
@@ -2219,13 +2738,9 @@ class SmellDetector(ast.NodeVisitor):
             params.discard(node.args.kwarg.arg)
         if not params:
             return
-        # Collect all names used in body (skip docstring)
-        used_names: set[str] = set()
-        for child in _walk_skip_nested_scopes(node):
-            if isinstance(child, ast.Name):
-                used_names.add(child.id)
-        # Parameter names appear as ast.arg, not ast.Name, in the signature
-        # but ARE ast.Name when referenced in the body
+        # Names in nested functions count only when those functions capture
+        # them. A nested parameter or assignment shadows the outer name.
+        used_names = _names_used_in_function(node)
         unused = params - used_names
         # Also skip _-prefixed params (convention for intentionally unused)
         unused = {p for p in unused if not p.startswith("_")}
@@ -3105,6 +3620,13 @@ class SmellDetector(ast.NodeVisitor):
         self.file_data.defined_functions.add(node.name)
         if isinstance(node, ast.AsyncFunctionDef):
             self.file_data.async_functions.add(node.name)
+        if self._class_stack:
+            if isinstance(node, ast.AsyncFunctionDef):
+                self.file_data.async_methods.add(node.name)
+        else:
+            self.file_data.module_level_functions.add(node.name)
+            if isinstance(node, ast.AsyncFunctionDef):
+                self.file_data.async_module_functions.add(node.name)
 
     def _collect_called_functions(self, node: ast.FunctionDef | ast.AsyncFunctionDef):
         """Track function calls for shotgun surgery, RFC, and call-chain detection."""
@@ -3117,6 +3639,7 @@ class SmellDetector(ast.NodeVisitor):
         callees: set[str] = set()
         call_lines: dict[str, int] = {}  # bare callee name -> first call-site line
         blocking: list[tuple[str, str]] = []
+        sites: list[tuple[str, str, str, int]] = []
         for child in _walk_skip_nested_scopes(node):
             if isinstance(child, ast.Call):
                 if isinstance(child.func, ast.Name):
@@ -3125,12 +3648,17 @@ class SmellDetector(ast.NodeVisitor):
                     callees.add(callee_bare)
                     if callee_bare not in call_lines:
                         call_lines[callee_bare] = child.lineno
+                    sites.append(("name", callee_bare, "", child.lineno))
                 elif isinstance(child.func, ast.Attribute):
                     callee_bare = child.func.attr
                     self.file_data.called_functions.add(callee_bare)
                     callees.add(callee_bare)
                     if callee_bare not in call_lines:
                         call_lines[callee_bare] = child.lineno
+                    receiver = ""
+                    if isinstance(child.func.value, ast.Name):
+                        receiver = child.func.value.id
+                    sites.append(("attr", callee_bare, receiver, child.lineno))
                 # Track blocking calls within this function
                 key = _get_blocking_call_key(child)
                 if key is not None:
@@ -3138,6 +3666,7 @@ class SmellDetector(ast.NodeVisitor):
                     blocking.append((key, display))
         self.file_data.function_calls_map[qname] = callees
         self.file_data.function_call_lines_map[qname] = call_lines
+        self.file_data.function_call_sites[qname] = sites
         if blocking:
             self.file_data.blocking_calls_in_functions[qname] = blocking
 
@@ -3509,28 +4038,94 @@ class SmellDetector(ast.NodeVisitor):
 # ---------------------------------------------------------------------------
 
 
+def _record_analysis_failure(
+    failures: list[AnalysisFailure] | None,
+    filepath: Path,
+    kind: str,
+    message: str,
+) -> None:
+    """Append an analysis failure when the caller is collecting them.
+
+    Args:
+        failures: Collector, or None to discard the diagnostic.
+        filepath: File that could not be analyzed.
+        kind: ``syntax``, ``decode``, ``permission``, or ``os``.
+        message: Filename-specific diagnostic.
+    """
+    if failures is None:
+        return
+    failures.append(AnalysisFailure(file=str(filepath), kind=kind, message=message))
+
+
 def scan_file(
-    filepath: Path, *, source: str | None = None,
+    filepath: Path,
+    *,
+    source: str | None = None,
+    failures: list[AnalysisFailure] | None = None,
 ) -> tuple[list[Finding], FileData | None]:
     """Parse and scan a single Python file.
 
     When *source* is provided the file is not re-read from disk (used by
     the caching layer which already read the content for hashing).
+    Decode, permission, and syntax failures are recorded in *failures*
+    and are not returned as an empty successful scan. They are never
+    written to the analysis cache.
+
+    Args:
+        filepath: File to scan.
+        source: Optional source text already read by the caller.
+        failures: Optional collector for files that could not be analyzed.
+
+    Returns:
+        Findings and file metadata. Metadata is None when analysis failed
+        or the path is not a readable Python module.
     """
     if source is None:
         try:
             source = filepath.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, PermissionError):
+        except UnicodeDecodeError:
+            _record_analysis_failure(
+                failures,
+                filepath,
+                "decode",
+                f"failed to analyze {filepath}: unable to decode as UTF-8",
+            )
+            return [], None
+        except PermissionError:
+            _record_analysis_failure(
+                failures,
+                filepath,
+                "permission",
+                f"failed to analyze {filepath}: permission denied",
+            )
+            return [], None
+        except OSError as exc:
+            detail = exc.strerror or str(exc)
+            _record_analysis_failure(
+                failures,
+                filepath,
+                "os",
+                f"failed to analyze {filepath}: {detail}",
+            )
             return [], None
     try:
         tree = ast.parse(source, filename=str(filepath))
-    except SyntaxError:
+    except SyntaxError as exc:
+        loc = f" at line {exc.lineno}" if exc.lineno else ""
+        detail = exc.msg or "invalid syntax"
+        _record_analysis_failure(
+            failures,
+            filepath,
+            "syntax",
+            f"failed to analyze {filepath}: syntax error{loc}: {detail}",
+        )
         return [], None
 
     detector = SmellDetector(str(filepath), source)
     detector.visit(tree)
     detector.finalize()
     detector.file_data.imports = _extract_imports(tree)
+    detector.file_data.import_bindings = _extract_import_bindings(tree)
 
     # Populate SC509 lazy-module fields from the AST
     detector.file_data.is_init = filepath.name == "__init__.py"
@@ -3657,38 +4252,188 @@ def _detect_duplicate_functions(all_data: list[FileData]) -> list[Finding]:
     return findings
 
 
+def _import_root(paths: list[Path]) -> Path:
+    """Choose the directory dotted module names are relative to.
+
+    The root walks up through enclosing packages so ``import pkg.mod`` keeps
+    the ``pkg`` prefix when ``pkg/__init__.py`` exists.
+
+    Args:
+        paths: Files participating in this scan.
+
+    Returns:
+        Directory whose children are top-level modules and packages.
+    """
+    parents: list[Path] = []
+    for path in paths:
+        try:
+            parents.append(path.resolve().parent)
+        except OSError:
+            parents.append(path.parent)
+    if not parents:
+        return Path.cwd()
+    try:
+        root = Path(os.path.commonpath([str(parent) for parent in parents]))
+    except ValueError:
+        root = parents[0]
+    while root != root.parent and (root / "__init__.py").is_file():
+        root = root.parent
+    return root
+
+
+def _module_name_for(filepath: str, root: Path) -> str:
+    """Return the dotted module name of a file relative to *root*.
+
+    Args:
+        filepath: Source file path stored on ``FileData``.
+        root: Import root from :func:`_import_root`.
+
+    Returns:
+        Dotted module name. Package initializers omit ``__init__``.
+    """
+    path = Path(filepath)
+    try:
+        rel = path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        if path.name == "__init__.py":
+            return path.parent.name or path.stem
+        parent = path.parent.name
+        return f"{parent}.{path.stem}" if parent else path.stem
+    parts = list(rel.parts)
+    if not parts:
+        return path.stem
+    if parts[-1] == "__init__.py":
+        parts = parts[:-1]
+    else:
+        parts[-1] = Path(parts[-1]).stem
+    if not parts:
+        return path.parent.name or "__init__"
+    return ".".join(parts)
+
+
 def _build_module_maps(
     all_data: list[FileData],
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """Build filepath->module and module->filepath maps, handling duplicate stems.
+    """Build filepath-to-module and module-to-filepath maps.
 
-    When two files share the same ``Path.stem`` (e.g. ``pkg1/utils.py`` and
-    ``pkg2/utils.py``), the stem alone is ambiguous.  For colliding stems we
-    fall back to ``parent/stem`` which mirrors how ``_extract_imports`` records
-    dotted imports (e.g. ``from pkg1.sub import x`` yields both ``pkg1`` and
-    ``sub``).  Because import matching uses *stem-level* tokens, the
-    collision-safe key is only used for the *graph node identity*; import
-    lookups still try the bare stem first and fall back to the qualified form.
+    Module names are dotted paths from a shared import root, so
+    ``pkg/a.py`` and ``other/a.py`` stay distinct. Package initializers are
+    named after the package, not ``__init__``.
+
+    Args:
+        all_data: Per-file metadata for the current scan.
+
+    Returns:
+        ``(filepath -> module, module -> filepath)``.
     """
-    # First pass: detect stem collisions
-    stem_count: dict[str, int] = {}
-    for fd in all_data:
-        stem = Path(fd.filepath).stem
-        stem_count[stem] = stem_count.get(stem, 0) + 1
-
-    # Second pass: build maps using qualified names for colliding stems
+    root = _import_root([Path(fd.filepath) for fd in all_data])
     module_map: dict[str, str] = {}
+    used: dict[str, str] = {}
     for fd in all_data:
-        p = Path(fd.filepath)
-        stem = p.stem
-        if stem_count[stem] > 1:
-            # Use parent/stem to disambiguate (e.g. "pkg1/utils")
-            module_map[fd.filepath] = f"{p.parent.name}/{stem}"
-        else:
-            module_map[fd.filepath] = stem
-
-    reverse_map: dict[str, str] = {v: k for k, v in module_map.items()}
+        name = _module_name_for(fd.filepath, root)
+        if name in used and used[name] != fd.filepath:
+            suffix = 2
+            candidate = f"{name}#{suffix}"
+            while candidate in used:
+                suffix += 1
+                candidate = f"{name}#{suffix}"
+            name = candidate
+        used[name] = fd.filepath
+        module_map[fd.filepath] = name
+    reverse_map = {module: filepath for filepath, module in module_map.items()}
     return module_map, reverse_map
+
+
+def _package_of(module_name: str, is_package: bool) -> str:
+    """Return the package that contains *module_name*.
+
+    Args:
+        module_name: Dotted module name.
+        is_package: True when the file is a package initializer.
+
+    Returns:
+        Package name. Empty for a top-level module.
+    """
+    if is_package:
+        return module_name
+    if "." not in module_name:
+        return ""
+    return module_name.rsplit(".", 1)[0]
+
+
+def _relative_package(module_name: str, is_package: bool, level: int) -> str | None:
+    """Resolve the package selected by a relative import level.
+
+    Args:
+        module_name: Importer's dotted name.
+        is_package: True when the importer is a package initializer.
+        level: ``ImportFrom.level``. ``1`` means ``from .``.
+
+    Returns:
+        Dotted package, possibly empty. None when the level escapes the top.
+    """
+    if level <= 0:
+        return None
+    parts = [part for part in _package_of(module_name, is_package).split(".") if part]
+    up = level - 1
+    if up > len(parts):
+        return None
+    if up:
+        parts = parts[:-up]
+    return ".".join(parts)
+
+
+def _resolve_imported_modules(
+    importer: str,
+    ref: tuple[int, str, tuple[str, ...]],
+    *,
+    is_package: bool,
+    known: set[str],
+) -> set[str]:
+    """Resolve one import to scanned modules.
+
+    Only full module paths that exist in *known* are returned. A basename
+    token is never matched against a sibling file in the importer's directory.
+
+    Args:
+        importer: Dotted name of the importing module.
+        ref: ``(level, module, names)`` import record.
+        is_package: True when *importer* is a package initializer.
+        known: Dotted names of modules in this scan.
+
+    Returns:
+        Known modules loaded by this import, including a parent package when
+        that package is part of the scan.
+    """
+    level, module, names = ref
+    if level == 0:
+        base = module
+    else:
+        relative = _relative_package(importer, is_package, level)
+        if relative is None:
+            return set()
+        if module:
+            base = f"{relative}.{module}" if relative else module
+        else:
+            base = relative
+    targets: set[str] = set()
+    if base and base in known:
+        targets.add(base)
+    if base:
+        parts = [part for part in base.split(".") if part]
+        for index in range(1, len(parts)):
+            prefix = ".".join(parts[:index])
+            if prefix in known:
+                targets.add(prefix)
+        for name in names:
+            submodule = f"{base}.{name}" if base else name
+            if submodule in known:
+                targets.add(submodule)
+    else:
+        for name in names:
+            if name in known:
+                targets.add(name)
+    return targets
 
 
 def _build_import_graph(
@@ -3696,23 +4441,30 @@ def _build_import_graph(
     module_map: dict[str, str],
     reverse_map: dict[str, str],
 ) -> dict[str, set[str]]:
-    """Build a directed import graph from file data.
+    """Build a directed import graph from dotted module identities.
 
-    For each file, each imported token is checked against known modules.
-    Qualified (``parent/stem``) entries are preferred when they exist in
-    ``reverse_map`` so that files with duplicate stems are matched correctly.
+    Args:
+        all_data: Per-file metadata, including structured imports.
+        module_map: File path to dotted module name.
+        reverse_map: Dotted module name to file path.
+
+    Returns:
+        Graph of module name to the modules it imports. Edges point only at
+        modules that were part of the scan.
     """
+    known = set(reverse_map)
     import_graph: dict[str, set[str]] = defaultdict(set)
     for fd in all_data:
         src_module = module_map[fd.filepath]
-        src_parent = Path(fd.filepath).parent.name
-        for imp in fd.imports:
-            # Try qualified form first (handles colliding stems)
-            qualified = f"{src_parent}/{imp}"
-            if qualified in reverse_map:
-                import_graph[src_module].add(qualified)
-            elif imp in reverse_map:
-                import_graph[src_module].add(imp)
+        import_graph.setdefault(src_module, set())
+        is_package = Path(fd.filepath).name == "__init__.py"
+        for ref in _coerce_imports(fd.imports):
+            found = _resolve_imported_modules(
+                src_module, ref, is_package=is_package, known=known
+            )
+            for target in found:
+                if target != src_module:
+                    import_graph[src_module].add(target)
     return import_graph
 
 
@@ -4358,111 +5110,205 @@ def _parse_setup_cfg_deps(path: Path) -> set[str]:
     return names
 
 
-def _detect_indirect_blocking(all_data: list[FileData]) -> list[Finding]:
-    """SC703 -- Cross-file call-chain tracing for indirect blocking in async code.
+def _call_qname(filepath: str, name: str) -> str:
+    """Return the per-file call-map key for a function.
 
-    If an async function calls a sync helper that transitively calls a known
-    blocking operation, flag the call site in the async function with the full
-    chain.
+    Args:
+        filepath: File that defines the function.
+        name: Bare function or method name.
+
+    Returns:
+        ``stem:name`` key used by the per-file call maps.
     """
+    return f"{Path(filepath).stem}:{name}"
+
+
+def _binding_file(
+    importer: FileData,
+    level: int,
+    module: str,
+    module_map: dict[str, str],
+    reverse_map: dict[str, str],
+) -> str | None:
+    """Resolve an imported module to a scanned file path.
+
+    Args:
+        importer: File that contains the import.
+        level: Relative import level. Zero means absolute.
+        module: Dotted module, or empty for ``from . import name``.
+        module_map: File path to dotted module name.
+        reverse_map: Dotted module name to file path.
+
+    Returns:
+        File path of the imported module, or None when it is not in the scan.
+    """
+    src = module_map.get(importer.filepath)
+    if src is None:
+        return None
+    known = set(reverse_map)
+    is_package = Path(importer.filepath).name == "__init__.py"
+    targets = _resolve_imported_modules(
+        src, (level, module, ()), is_package=is_package, known=known
+    )
+    specific = [
+        name for name in targets
+        if module and (name == module or name.endswith("." + module))
+    ]
+    if specific:
+        return reverse_map.get(max(specific, key=len))
+    if len(targets) == 1:
+        return reverse_map.get(next(iter(targets)))
+    if level == 0 and module and module in reverse_map:
+        return reverse_map[module]
+    return None
+
+
+def _resolve_call_target(
+    caller: FileData,
+    kind: str,
+    name: str,
+    receiver: str,
+    by_path: dict[str, FileData],
+    module_map: dict[str, str],
+    reverse_map: dict[str, str],
+) -> tuple[FileData, str, bool] | None:
+    """Bind one call to the function it actually invokes.
+
+    Args:
+        caller: File containing the call.
+        kind: ``name`` for ``func()`` or ``attr`` for ``obj.func()``.
+        name: Called attribute or function name.
+        receiver: Object name for an attribute call, else empty.
+        by_path: File path to file metadata.
+        module_map: File path to dotted module name.
+        reverse_map: Dotted module name to file path.
+
+    Returns:
+        ``(defining file, function name, is_method)`` or None when the
+        callee is unresolved. Unrelated same-named functions are not used.
+    """
+    if kind == "name" and name in caller.module_level_functions:
+        return caller, name, False
+    if kind == "attr" and receiver in ("self", "cls"):
+        if name in caller.defined_functions:
+            return caller, name, True
+        return None
+    if kind == "attr":
+        binding = caller.import_bindings.get(receiver)
+        if binding is None or binding[2]:
+            return None
+        path = _binding_file(caller, binding[0], binding[1], module_map, reverse_map)
+        target = by_path.get(path or "")
+        if target is not None and name in target.module_level_functions:
+            return target, name, False
+        return None
+    binding = caller.import_bindings.get(name)
+    if binding is None:
+        return None
+    level, module, func = binding
+    if not func:
+        return None
+    if level and not module:
+        path = _binding_file(caller, level, "", module_map, reverse_map)
+    else:
+        path = _binding_file(caller, level, module, module_map, reverse_map)
+    target = by_path.get(path or "")
+    if target is not None and func in target.module_level_functions:
+        return target, func, False
+    return None
+
+
+def _callee_is_async(target: FileData, name: str, is_method: bool) -> bool:
+    """Return whether the resolved callable is an async function.
+
+    Args:
+        target: File that defines the callable.
+        name: Bare function or method name.
+        is_method: True when the call was ``self.name()`` or ``cls.name()``.
+
+    Returns:
+        True when that specific definition is async.
+    """
+    if is_method:
+        return name in target.async_methods
+    return name in target.async_module_functions
+
+
+def _detect_indirect_blocking(all_data: list[FileData]) -> list[Finding]:
+    """SC703 -- Trace indirect blocking calls from async functions.
+
+    The callee is resolved in the caller's module, enclosing scope, and
+    import bindings before its async-ness is checked. An unrelated function
+    with the same name cannot suppress or create a finding.
+
+    Args:
+        all_data: Metadata for every file in the scan.
+
+    Returns:
+        Indirect SC703 findings. Direct blocking calls are reported separately.
+    """
+    if not all_data:
+        return []
+    module_map, reverse_map = _build_module_maps(all_data)
+    by_path = {fd.filepath: fd for fd in all_data}
     findings: list[Finding] = []
 
-    # Build global maps keyed by qualified name (``module_stem:func_name``).
-    # Bare-name sets (async_funcs, bare_defined) are kept for fast membership
-    # checks where module resolution is not needed.
-    func_callees: dict[str, set[str]] = {}   # qname -> set of bare callee names
-    func_blocking: dict[str, list[tuple[str, str]]] = {}  # qname -> [(key, display)]
-    func_call_lines: dict[str, dict[str, int]] = {}  # qname -> {bare_callee -> line}
-    # bare name -> list of qnames that define it (for resolving callees)
-    bare_to_qnames: dict[str, list[str]] = defaultdict(list)
-    # bare async func name -> filepath (for async-skip check)
-    async_funcs_bare: dict[str, str] = {}
-    # qname -> filepath
-    qname_to_file: dict[str, str] = {}
-
-    for fd in all_data:
-        stem = Path(fd.filepath).stem
-        for fname in fd.defined_functions:
-            qn = f"{stem}:{fname}"
-            bare_to_qnames[fname].append(qn)
-            qname_to_file[qn] = fd.filepath
-        for qname, callees in fd.function_calls_map.items():
-            func_callees[qname] = callees
-        for qname, blockers in fd.blocking_calls_in_functions.items():
-            func_blocking[qname] = blockers
-        for qname, lines in fd.function_call_lines_map.items():
-            func_call_lines[qname] = lines
-        for fname in fd.async_functions:
-            async_funcs_bare[fname] = fd.filepath
-
-    def _trace_blocking(
-        qname: str, depth: int, visited: set[str]
-    ) -> list[str] | None:
-        """Trace transitive callees looking for a blocking call.
-
-        Returns the chain ``[bare_func_name, ..., blocking_display]`` on hit,
-        or ``None`` if the chain is clean.
-        """
-        if depth > _MAX_CALL_CHAIN_DEPTH:
+    def trace(fd: FileData, name: str, depth: int, visited: set[tuple[str, str]]) -> list[str] | None:
+        key = (fd.filepath, name)
+        if depth > _MAX_CALL_CHAIN_DEPTH or key in visited:
             return None
-        if qname in visited:
-            return None  # cycle
-        visited.add(qname)
-
-        bare = qname.split(":", 1)[1]
-
-        # Check if this function directly contains a blocking call
-        if qname in func_blocking:
-            _key, display = func_blocking[qname][0]
-            return [bare, display]
-
-        # Recurse into callees (bare names resolved to qnames)
-        for callee_bare in func_callees.get(qname, set()):
-            # Skip if callee is async (it's awaited, not blocking)
-            if callee_bare in async_funcs_bare:
+        visited.add(key)
+        qname = _call_qname(fd.filepath, name)
+        blockers = fd.blocking_calls_in_functions.get(qname)
+        if blockers:
+            return [name, blockers[0][1]]
+        for kind, callee, receiver, _line in fd.function_call_sites.get(qname, []):
+            resolved = _resolve_call_target(
+                fd, kind, callee, receiver, by_path, module_map, reverse_map
+            )
+            if resolved is None:
                 continue
-            # Resolve bare callee to all matching qnames
-            for callee_qname in bare_to_qnames.get(callee_bare, []):
-                chain = _trace_blocking(callee_qname, depth + 1, visited.copy())
-                if chain is not None:
-                    return [bare] + chain
-
+            target, target_name, is_method = resolved
+            if _callee_is_async(target, target_name, is_method):
+                continue
+            chain = trace(target, target_name, depth + 1, visited.copy())
+            if chain is not None:
+                return [name, *chain]
         return None
 
-    # For each async function, check its direct sync callees
     for fd in all_data:
-        stem = Path(fd.filepath).stem
-        for fname in fd.async_functions:
-            async_qname = f"{stem}:{fname}"
-            callees = func_callees.get(async_qname, set())
-            call_lines = func_call_lines.get(async_qname, {})
-            for callee_bare in callees:
-                # Skip async callees
-                if callee_bare in async_funcs_bare:
+        async_names = fd.async_module_functions | fd.async_methods
+        for fname in async_names:
+            qname = _call_qname(fd.filepath, fname)
+            reported: set[tuple[str, int]] = set()
+            for kind, callee, receiver, line in fd.function_call_sites.get(qname, []):
+                resolved = _resolve_call_target(
+                    fd, kind, callee, receiver, by_path, module_map, reverse_map
+                )
+                if resolved is None or _callee_is_async(resolved[0], resolved[1], resolved[2]):
                     continue
-                # Skip if callee is not a known defined function (built-in, etc.)
-                if callee_bare not in bare_to_qnames:
+                chain = trace(resolved[0], resolved[1], 1, set())
+                if chain is None:
                     continue
-                # Trace the call chain through all matching definitions
-                for callee_qname in bare_to_qnames[callee_bare]:
-                    chain = _trace_blocking(callee_qname, 1, set())
-                    if chain is not None:
-                        chain_str = " -> ".join([fname] + chain)
-                        call_line = call_lines.get(callee_bare, 1)
-                        findings.append(
-                            _make_finding(
-                                file=fd.filepath,
-                                line=call_line,
-                                pattern="SC703",
-                                name="Avoid Blocking Calls in Async Functions",
-                                severity="warning",
-                                message=f"Indirect blocking call chain: `{chain_str}` "
-                                f"-- sync helper called from async function contains blocking I/O",
-                                category="idioms",
-                            )
-                        )
-                        break  # one finding per callee is enough
-
+                marker = (callee, line)
+                if marker in reported:
+                    continue
+                reported.add(marker)
+                chain_str = " -> ".join([fname, *chain])
+                findings.append(
+                    _make_finding(
+                        file=fd.filepath,
+                        line=line,
+                        pattern="SC703",
+                        name="Avoid Blocking Calls in Async Functions",
+                        severity="warning",
+                        message=(
+                            f"Indirect blocking call chain: `{chain_str}` "
+                            "-- sync helper called from async function contains blocking I/O"
+                        ),
+                        category="idioms",
+                    )
+                )
     return findings
 
 
@@ -4535,14 +5381,109 @@ def cross_file_analysis(all_data: list[FileData]) -> list[Finding]:
     return findings
 
 
-def scan_path(target: Path) -> list[Finding]:
+def _single_file_followups(all_file_data: list[FileData]) -> list[Finding]:
+    """Metric and indirect-blocking checks for one successfully analyzed file.
+
+    Args:
+        all_file_data: Metadata for that file. Must contain exactly one item.
+
+    Returns:
+        Findings that do not require a second file.
+    """
+    findings: list[Finding] = []
+    findings.extend(_detect_low_cohesion(all_file_data))
+    findings.extend(_detect_high_coupling(all_file_data))
+    findings.extend(_detect_high_rfc(all_file_data))
+    findings.extend(_detect_middle_man(all_file_data))
+    findings.extend(_detect_lazy_modules(all_file_data))
+    findings.extend(_detect_indirect_blocking(all_file_data))
+    return findings
+
+
+def _extend_cross_file(
+    all_findings: list[Finding], all_file_data: list[FileData]
+) -> None:
+    """Append cross-file findings, including single-file indirect blocking.
+
+    Args:
+        all_findings: Buffer of findings collected so far.
+        all_file_data: Metadata for every file that was analyzed.
+    """
+    if len(all_file_data) > 1:
+        all_findings.extend(cross_file_analysis(all_file_data))
+    elif len(all_file_data) == 1:
+        all_findings.extend(_single_file_followups(all_file_data))
+
+
+def _config_root(config: dict | None, targets: list[Path]) -> Path | None:
+    """Directory that per-file ignore patterns are relative to.
+
+    Args:
+        config: Loaded smellcheck config. ``_config_root`` overrides discovery.
+        targets: Paths being scanned. The nearest pyproject.toml wins.
+
+    Returns:
+        Configuration root, or None when no project config can be found.
+    """
+    if config:
+        explicit = config.get("_config_root")
+        if explicit:
+            return Path(str(explicit))
+    for target in targets:
+        pyproject = _find_pyproject(target)
+        if pyproject is not None:
+            return pyproject.parent
+    return None
+
+
+def _per_file_pattern_matches(
+    filepath: str, pattern: str, config_root: Path | None
+) -> bool:
+    """Return whether *filepath* matches a per-file-ignore glob.
+
+    Patterns are compared with the stored path, the resolved path, and the
+    path relative to the configuration root. Relative patterns such as
+    ``tests/*`` therefore match project files even when the scanner stores
+    absolute paths.
+
+    Args:
+        filepath: Finding path, often absolute.
+        pattern: Glob from ``per-file-ignores``.
+        config_root: Directory the glob is relative to.
+
+    Returns:
+        True when the glob covers this file.
+    """
+    import fnmatch
+
+    path = Path(filepath)
+    norm_pattern = pattern.replace("\\", "/")
+    candidates = [filepath.replace("\\", "/"), path.as_posix()]
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    candidates.append(resolved.as_posix())
+    if config_root is not None:
+        try:
+            rel = resolved.relative_to(config_root.resolve())
+        except (OSError, ValueError):
+            rel = None
+        if rel is not None:
+            candidates.append(rel.as_posix())
+    return any(fnmatch.fnmatch(candidate, norm_pattern) for candidate in candidates)
+
+
+def scan_path(
+    target: Path, *, failures: list[AnalysisFailure] | None = None
+) -> list[Finding]:
     """Scan a file or directory recursively. Two-pass: per-file then cross-file."""
     all_findings: list[Finding] = []
     all_file_data: list[FileData] = []
 
     if target.is_file():
         if target.suffix == ".py":
-            findings, fd = scan_file(target)
+            findings, fd = scan_file(target, failures=failures)
             all_findings.extend(findings)
             if fd:
                 all_file_data.append(fd)
@@ -4563,22 +5504,12 @@ def scan_path(target: Path) -> list[Finding]:
                 for p in parts
             ):
                 continue
-            findings, fd = scan_file(py_file)
+            findings, fd = scan_file(py_file, failures=failures)
             all_findings.extend(findings)
             if fd:
                 all_file_data.append(fd)
 
-    if len(all_file_data) > 1:
-        all_findings.extend(cross_file_analysis(all_file_data))
-    elif len(all_file_data) == 1:
-        # Single-file scan: still compute per-class metrics (LCOM, CBO, RFC, MID),
-        # lazy-module detection, and indirect blocking (same-file sync helpers).
-        all_findings.extend(_detect_low_cohesion(all_file_data))
-        all_findings.extend(_detect_high_coupling(all_file_data))
-        all_findings.extend(_detect_high_rfc(all_file_data))
-        all_findings.extend(_detect_middle_man(all_file_data))
-        all_findings.extend(_detect_lazy_modules(all_file_data))
-        all_findings.extend(_detect_indirect_blocking(all_file_data))
+    _extend_cross_file(all_findings, all_file_data)
 
     # SC706: conflicting concurrency libraries (project-level check)
     if target.is_dir():
@@ -4620,6 +5551,7 @@ def scan_paths(
     config: dict | None = None,
     cache_dir: Path | None = None,
     use_cache: bool = True,
+    failures: list[AnalysisFailure] | None = None,
 ) -> list[Finding]:
     """Scan multiple paths, aggregate findings, run cross-file analysis once.
 
@@ -4637,6 +5569,11 @@ def scan_paths(
         to disable.
     use_cache:
         When ``True`` (default), skip re-analysis of unchanged files.
+        The cache key includes the file's resolved path, so identical
+        contents in two files do not share findings.
+    failures:
+        Optional collector for files that could not be parsed or read.
+        Those files are not stored in the cache.
     """
     all_findings: list[Finding] = []
     all_file_data: list[FileData] = []
@@ -4669,39 +5606,59 @@ def scan_paths(
                 continue
             seen.add(resolved)
 
-            # Try cache before expensive scan
+            # Try cache before expensive scan. Failures are not cached:
+            # a later run must still report that the file could not be analyzed.
             if _cache is not None:
                 try:
                     source = py_file.read_text(encoding="utf-8")
-                except (UnicodeDecodeError, PermissionError):
+                except UnicodeDecodeError:
+                    _record_analysis_failure(
+                        failures,
+                        py_file,
+                        "decode",
+                        f"failed to analyze {py_file}: unable to decode as UTF-8",
+                    )
                     continue
-                key = _cache_key(source, _cfghash, _version)
+                except PermissionError:
+                    _record_analysis_failure(
+                        failures,
+                        py_file,
+                        "permission",
+                        f"failed to analyze {py_file}: permission denied",
+                    )
+                    continue
+                except OSError as exc:
+                    detail = exc.strerror or str(exc)
+                    _record_analysis_failure(
+                        failures,
+                        py_file,
+                        "os",
+                        f"failed to analyze {py_file}: {detail}",
+                    )
+                    continue
+                key = _cache_key(source, _cfghash, _version, _cache_file_id(py_file))
                 cached = _read_cache(_cache, key)
                 if cached is not None:
                     findings, fd = cached
+                    current = str(py_file)
+                    findings = _retarget_findings(findings, current)
+                    fd = _retarget_file_data(fd, current)
                     all_findings.extend(findings)
                     all_file_data.append(fd)
                     continue
                 # Cache miss — scan (reuse already-read source) and write
-                findings, fd = scan_file(py_file, source=source)
+                findings, fd = scan_file(py_file, source=source, failures=failures)
                 all_findings.extend(findings)
-                if fd:
+                if fd is not None:
                     all_file_data.append(fd)
                     _write_cache(_cache, key, findings, fd)
             else:
-                findings, fd = scan_file(py_file)
+                findings, fd = scan_file(py_file, failures=failures)
                 all_findings.extend(findings)
-                if fd:
+                if fd is not None:
                     all_file_data.append(fd)
 
-    if len(all_file_data) > 1:
-        all_findings.extend(cross_file_analysis(all_file_data))
-    elif len(all_file_data) == 1:
-        all_findings.extend(_detect_low_cohesion(all_file_data))
-        all_findings.extend(_detect_high_coupling(all_file_data))
-        all_findings.extend(_detect_high_rfc(all_file_data))
-        all_findings.extend(_detect_middle_man(all_file_data))
-        all_findings.extend(_detect_lazy_modules(all_file_data))
+    _extend_cross_file(all_findings, all_file_data)
 
     # SC706: conflicting concurrency libraries (project-level check)
     seen_roots: set[Path] = set()
@@ -4763,12 +5720,13 @@ def scan_paths(
             all_findings = [f for f in all_findings if f.pattern not in ignore_set]
 
         if per_file_ignores:
-            import fnmatch
-
+            ignore_root = _config_root(config, targets)
             result = []
             for f in all_findings:
                 suppressed = False
                 for glob_pat, codes in per_file_ignores.items():
+                    if not isinstance(codes, (list, tuple)):
+                        continue
                     code_set: set[str] = set()
                     for c in codes:
                         resolved = _resolve_code(c)
@@ -4777,7 +5735,10 @@ def scan_paths(
                             if resolved
                             else {f"#{c}" if not c.startswith("#") else c}
                         )
-                    if fnmatch.fnmatch(f.file, glob_pat) and f.pattern in code_set:
+                    if (
+                        _per_file_pattern_matches(f.file, str(glob_pat), ignore_root)
+                        and f.pattern in code_set
+                    ):
                         suppressed = True
                         break
                 if not suppressed:
@@ -5220,7 +6181,8 @@ _HELP_TEXT: Final = textwrap.dedent("""\
                           (default: text)
       --json              Deprecated alias for --format json
       --fail-on SEV       Exit 1 if any finding >= SEV: info | warning | error
-                          (default: error)
+                          (default: error). Exit 2 if a file could not be
+                          analyzed (syntax, encoding, or permissions).
       --min-severity SEV  Only display findings >= SEV: info | warning | error
                           (default: info)
       --select CODES      Only run these checks (comma-separated, e.g. SC701,SC601)
@@ -5285,6 +6247,13 @@ _HELP_TEXT: Final = textwrap.dedent("""\
       smellcheck src/ --changed-only
       smellcheck src/ --plan
       smellcheck src/ --plan --format json
+
+    Exit status:
+      0  No findings at or above --fail-on, and every file was analyzed.
+      1  At least one finding meets or exceeds --fail-on.
+      2  One or more files could not be analyzed. Findings from files that
+         were analyzed are still reported. Diagnostics go to stderr and are
+         not mixed into the JSON findings array. Exit 2 wins over exit 1.
 """)
 
 
@@ -5520,6 +6489,37 @@ def _read_env_config() -> dict:
     return env_config
 
 
+def _print_analysis_failures(failures: list[AnalysisFailure]) -> None:
+    """Write one stderr diagnostic per file that could not be analyzed.
+
+    Args:
+        failures: Analysis failures collected during the scan.
+    """
+    for failure in failures:
+        print(f"smellcheck: error: {failure.message}", file=sys.stderr)
+
+
+def _status_code(
+    findings: list[Finding], failures: list[AnalysisFailure], fail_on: str
+) -> int:
+    """Choose the process exit status for a finished scan.
+
+    Args:
+        findings: Smell findings that will be reported.
+        failures: Files that could not be analyzed.
+        fail_on: Minimum severity that produces exit status 1.
+
+    Returns:
+        2 when any file failed analysis, 1 when a finding meets *fail_on*,
+        otherwise 0. Analysis errors take precedence over findings.
+    """
+    if failures:
+        return _EXIT_ANALYSIS_ERROR
+    fail_rank = SEVERITY_ORDER.get(fail_on, 2)
+    has_fail = any(finding.severity_rank >= fail_rank for finding in findings)
+    return _EXIT_FINDINGS if has_fail else 0
+
+
 def main():
     raw_args = list(sys.argv[1:])
 
@@ -5658,11 +6658,13 @@ def main():
     elif config.get("cache-dir"):
         resolved_cache_dir = Path(config["cache-dir"])
 
+    failures: list[AnalysisFailure] = []
     findings = scan_paths(
         paths,
         config=config,
         cache_dir=resolved_cache_dir,
         use_cache=use_cache,
+        failures=failures,
     )
 
     # Apply --scope filter
@@ -5672,6 +6674,9 @@ def main():
     # Generate baseline mode
     if generate_baseline:
         print(_generate_baseline_json(findings, Path.cwd()))
+        if failures:
+            _print_analysis_failures(failures)
+            sys.exit(_EXIT_ANALYSIS_ERROR)
         sys.exit(0)
 
     # Compare against baseline
@@ -5690,13 +6695,19 @@ def main():
             print(_format_plan_json(plan))
         else:
             print(_format_plan_text(plan), end="")
+        if failures:
+            _print_analysis_failures(failures)
+            sys.exit(_EXIT_ANALYSIS_ERROR)
         sys.exit(0)
 
-    print_findings(findings, min_severity=min_severity, output_format=output_format)
-
-    fail_rank = SEVERITY_ORDER.get(fail_on, 2)
-    has_fail = any(f.severity_rank >= fail_rank for f in findings)
-    sys.exit(1 if has_fail else 0)
+    min_rank = SEVERITY_ORDER.get(min_severity, 0)
+    visible = [f for f in findings if f.severity_rank >= min_rank]
+    # An empty text report must not claim success when analysis failed.
+    if not (output_format == "text" and not visible and failures):
+        print_findings(findings, min_severity=min_severity, output_format=output_format)
+    if failures:
+        _print_analysis_failures(failures)
+    sys.exit(_status_code(findings, failures, fail_on))
 
 
 if __name__ == "__main__":

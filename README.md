@@ -119,7 +119,7 @@ smellcheck reads `[tool.smellcheck]` from the nearest `pyproject.toml`:
 extends = "base.toml"               # inherit from a shared config file
 select = ["SC101", "SC201", "SC701"]  # only run these checks (default: all)
 ignore = ["SC601", "SC202"]          # skip these checks
-per-file-ignores = {"tests/*" = ["SC201", "SC206"]}  # per-path overrides
+per-file-ignores = {"tests/*" = ["SC201", "SC206"]}  # relative to the pyproject.toml directory
 fail-on = "warning"                  # override default fail-on
 format = "text"                      # override default format
 baseline = ".smellcheck-baseline.json"  # suppress known findings
@@ -128,6 +128,8 @@ cache-dir = ".smellcheck-cache"        # cache directory (default: .smellcheck-c
 ```
 
 CLI flags override config values. **Precedence:** CLI flags > environment variables > pyproject.toml > defaults.
+
+`per-file-ignores` patterns are matched against each file's path relative to the directory that contains the `pyproject.toml` providing the setting. `tests/*` therefore ignores `tests/test_sample.py` whether you pass `tests`, an absolute path, or run smellcheck from another working directory. Absolute patterns are matched against the absolute path. Files that do not match stay unsuppressed.
 
 ### Environment variables
 
@@ -179,6 +181,8 @@ def foo(x=[]):  # noqa: SC701
 ```
 
 Use `# noqa` (no codes) to suppress all findings on that line. Multiple codes: `# noqa: SC601,SC202`
+
+Only real comments are recognized. The same text inside a string or docstring does not suppress anything. A trailing comment after a string literal still does.
 
 ### Block-level
 
@@ -273,7 +277,7 @@ Cross-file checks (cyclic imports, shotgun surgery, etc.) run on the changed fil
 
 smellcheck caches per-file analysis results in `.smellcheck-cache/` to skip unchanged files on repeated scans. This is especially useful for pre-commit hooks and editor integrations.
 
-Cache entries are keyed by file content hash, config hash, and smellcheck version — any change invalidates the relevant entry. Cross-file analysis (cyclic imports, duplicate code, etc.) always re-runs since it depends on the full file set.
+Cache entries are keyed by the file's resolved path, content hash, config hash, and smellcheck version. Two files with the same source do not share an entry, and renaming a file does not reuse the old path. Findings always name the file being scanned, including filename-dependent results such as `__init__.py`. A file that fails to parse or decode is not cached as a clean result. Cross-file analysis (cyclic imports, duplicate code, etc.) always re-runs since it depends on the full file set.
 
 ```bash
 # Caching is enabled by default — just run normally
