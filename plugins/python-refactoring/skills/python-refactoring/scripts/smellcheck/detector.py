@@ -2355,8 +2355,9 @@ def _normalize_ast(node: ast.AST) -> str:
 def _iter_module_imports(node: ast.AST) -> Iterator[ast.Import | ast.ImportFrom]:
     """Yield import statements that run at module import time.
 
-    Imports nested inside functions, lambdas, or classes are skipped.
-    Imports inside ``if`` and ``try`` still count.
+    Imports nested inside function or lambda bodies are skipped because they
+    run only when the callable is invoked. Class bodies execute during import,
+    so their imports count. Imports inside ``if`` and ``try`` also count.
 
     Args:
         node: AST node to walk.
@@ -2365,7 +2366,7 @@ def _iter_module_imports(node: ast.AST) -> Iterator[ast.Import | ast.ImportFrom]
         ``Import`` and ``ImportFrom`` nodes.
     """
     for child in ast.iter_child_nodes(node):
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             continue
         if isinstance(child, (ast.Import, ast.ImportFrom)):
             yield child
@@ -4405,77 +4406,77 @@ def _detect_duplicate_functions(all_data: list[FileData]) -> list[Finding]:
     return findings
 
 
-def _import_root(paths: list[Path]) -> Path:
-    """Choose the directory dotted module names are relative to.
+def _fallback_root(paths: list[Path]) -> Path:
+    """Choose the root for files that are not inside a package.
 
-    The root is derived from the package structure rather than from every
-    scanned file, so adding an unrelated file (for example ``tests/``) to a
-    scan does not rename modules that already have a stable package root.
-    Directories that contain an ``__init__.py`` are packages; the root is the
-    parent of the outermost such package. When no scanned file lives inside a
-    package, the root falls back to the common parent of the files.
+    Files inside a package are named from their own package boundary (see
+    :func:`_module_name_for`), so this root only affects loose modules. It is
+    the common parent of the scanned files, which keeps flat layouts such as
+    ``pkg_a/utils.py`` reading as ``pkg_a.utils``.
 
     Args:
         paths: Files participating in this scan.
 
     Returns:
-        Directory whose children are top-level modules and packages.
+        Directory whose children are top-level modules for loose files.
     """
     parents: list[Path] = []
-    package_dirs: set[Path] = set()
     for path in paths:
         try:
-            resolved = path.resolve()
+            parents.append(path.resolve().parent)
         except OSError:
-            resolved = path
-        parents.append(resolved.parent)
-        directory = resolved.parent
-        while (directory / "__init__.py").is_file():
-            package_dirs.add(directory)
-            if directory == directory.parent:
-                break
-            directory = directory.parent
+            parents.append(path.parent)
     if not parents:
         return Path.cwd()
-    if package_dirs:
-        outermost = [d for d in package_dirs if d.parent not in package_dirs]
-        try:
-            return Path(os.path.commonpath([str(d.parent) for d in outermost]))
-        except ValueError:
-            pass
     try:
         return Path(os.path.commonpath([str(parent) for parent in parents]))
     except ValueError:
         return parents[0]
 
 
-def _module_name_for(filepath: str, root: Path) -> str:
-    """Return the dotted module name of a file relative to *root*.
+def _module_name_for(filepath: str, fallback_root: Path) -> str:
+    """Return the dotted module name of a file.
+
+    A file inside a package is named from its own package boundary, so an
+    unrelated package in the same scan cannot rename it. A file that is not
+    inside a package is named relative to *fallback_root*.
 
     Args:
         filepath: Source file path stored on ``FileData``.
-        root: Import root from :func:`_import_root`.
+        fallback_root: Root for files that are not inside any package.
 
     Returns:
         Dotted module name. Package initializers omit ``__init__``.
     """
     path = Path(filepath)
     try:
-        rel = path.resolve().relative_to(root.resolve())
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    directory = resolved.parent
+    package_dirs: list[str] = []
+    while (directory / "__init__.py").is_file():
+        package_dirs.append(directory.name)
+        if directory == directory.parent:
+            break
+        directory = directory.parent
+    root = directory if package_dirs else fallback_root
+    try:
+        rel = resolved.relative_to(root)
     except (OSError, ValueError):
-        if path.name == "__init__.py":
-            return path.parent.name or path.stem
-        parent = path.parent.name
-        return f"{parent}.{path.stem}" if parent else path.stem
+        if resolved.name == "__init__.py":
+            return resolved.parent.name or resolved.stem
+        parent = resolved.parent.name
+        return f"{parent}.{resolved.stem}" if parent else resolved.stem
     parts = list(rel.parts)
     if not parts:
-        return path.stem
+        return resolved.stem
     if parts[-1] == "__init__.py":
         parts = parts[:-1]
     else:
         parts[-1] = Path(parts[-1]).stem
     if not parts:
-        return path.parent.name or "__init__"
+        return resolved.parent.name or "__init__"
     return ".".join(parts)
 
 
@@ -4484,9 +4485,10 @@ def _build_module_maps(
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Build filepath-to-module and module-to-filepath maps.
 
-    Module names are dotted paths from a shared import root, so
-    ``pkg/a.py`` and ``other/a.py`` stay distinct. Package initializers are
-    named after the package, not ``__init__``.
+    A file inside a package is named from its own package boundary, so
+    ``pkg/a.py`` stays ``pkg.a`` regardless of other packages in the scan.
+    Loose files are named relative to a shared fallback root. Package
+    initializers are named after the package, not ``__init__``.
 
     Args:
         all_data: Per-file metadata for the current scan.
@@ -4494,11 +4496,11 @@ def _build_module_maps(
     Returns:
         ``(filepath -> module, module -> filepath)``.
     """
-    root = _import_root([Path(fd.filepath) for fd in all_data])
+    fallback_root = _fallback_root([Path(fd.filepath) for fd in all_data])
     module_map: dict[str, str] = {}
     used: dict[str, str] = {}
     for fd in all_data:
-        name = _module_name_for(fd.filepath, root)
+        name = _module_name_for(fd.filepath, fallback_root)
         if name in used and used[name] != fd.filepath:
             suffix = 2
             candidate = f"{name}#{suffix}"
@@ -5329,6 +5331,14 @@ def _binding_module_name(
         return None
     known = set(reverse_map)
     is_package = Path(importer.filepath).name == "__init__.py"
+    if level and not module:
+        # ``from . import name`` names a member of the exact relative package.
+        # ``_resolve_imported_modules`` would also add ancestor-loading edges,
+        # making the single target ambiguous, so resolve the package directly.
+        relative = _relative_package(src, is_package, level)
+        if relative and relative in reverse_map:
+            return relative
+        return None
     targets = _resolve_imported_modules(
         src, (level, module, ()), is_package=is_package, known=known
     )

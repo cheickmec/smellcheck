@@ -1063,3 +1063,59 @@ def test_scoped_import_bindings_survive_the_cache(tmp_path: Path) -> None:
     cached = [(f.pattern, f.message) for f in scan_paths(targets, cache_dir=cache_dir)]
     assert cached == fresh
 
+# ---------------------------------------------------------------------------
+# 16. Module identity and eager class-body imports
+# ---------------------------------------------------------------------------
+
+
+def test_package_identity_is_independent_of_other_packages(tmp_path: Path) -> None:
+    """A second package in the scan must not rename ``pkg`` or hide a cycle."""
+    pkg = tmp_path / "src" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "a.py").write_text("from pkg.b import Y\nX = 1\n", encoding="utf-8")
+    (pkg / "b.py").write_text("from pkg.a import X\nY = 2\n", encoding="utf-8")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "__init__.py").write_text("", encoding="utf-8")
+    (tests / "test_x.py").write_text("def t():\n    return 1\n", encoding="utf-8")
+    findings = _sc503([pkg, tests])
+    assert len(findings) == 1
+    assert "pkg.a" in findings[0].message
+    assert "pkg.b" in findings[0].message
+
+
+def test_relative_from_import_submodule_is_indirect_blocking(tmp_path: Path) -> None:
+    """``from . import b`` then ``b.fetch()`` traces into the sibling module."""
+    sub = tmp_path / "pkg" / "sub"
+    sub.mkdir(parents=True)
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (sub / "__init__.py").write_text("", encoding="utf-8")
+    (sub / "b.py").write_text(
+        "import time\n\ndef fetch():\n    time.sleep(1)\n", encoding="utf-8"
+    )
+    (sub / "a.py").write_text(
+        "import asyncio\nfrom . import b\n\nasync def run():\n    b.fetch()\n",
+        encoding="utf-8",
+    )
+    findings = scan_paths([tmp_path / "pkg"], use_cache=False)
+    messages = [f.message for f in findings if f.pattern == "SC703"]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
+
+def test_class_body_import_is_a_dependency(tmp_path: Path) -> None:
+    """An import in a class body runs at import time, so it counts for SC503."""
+    (tmp_path / "a.py").write_text("class A:\n    import b\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("import a\n", encoding="utf-8")
+    findings = _sc503([tmp_path / "a.py", tmp_path / "b.py"])
+    assert len(findings) == 1
+    assert "a" in findings[0].message
+    assert "b" in findings[0].message
+
+
+def test_function_body_import_is_not_a_module_dependency(tmp_path: Path) -> None:
+    """An import inside a function body is deferred, so it is not a cycle edge."""
+    (tmp_path / "a.py").write_text("def f():\n    import b\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("import a\n", encoding="utf-8")
+    assert _sc503([tmp_path / "a.py", tmp_path / "b.py"]) == []
+
