@@ -853,3 +853,213 @@ def test_precommit_serial_batch_sees_cycle_across_old_boundary(tmp_path: Path) -
     serial_rc, parallel_rc = completed.stdout.strip().split()
     assert serial_rc == "1"
     assert parallel_rc == "0"
+
+
+# ---------------------------------------------------------------------------
+# 11. Parent-package edges are not cycles
+# ---------------------------------------------------------------------------
+
+
+def test_package_reexport_is_not_a_cycle(tmp_path: Path) -> None:
+    """Re-exporting a submodule must not fake a ``pkg -> pkg.a -> pkg`` cycle."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("from .a import X\n", encoding="utf-8")
+    (pkg / "a.py").write_text("from .b import Y\nX = 1\n", encoding="utf-8")
+    (pkg / "b.py").write_text("Y = 2\n", encoding="utf-8")
+    assert _sc503([pkg]) == []
+
+
+def test_module_identity_ignores_unrelated_files(tmp_path: Path) -> None:
+    """An unrelated file must not rename modules or hide a real cycle."""
+    pkg = tmp_path / "src" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "a.py").write_text("from pkg.b import Y\nX = 1\n", encoding="utf-8")
+    (pkg / "b.py").write_text("from pkg.a import X\nY = 2\n", encoding="utf-8")
+    before = _sc503([pkg])
+    assert len(before) == 1
+    assert "pkg.a" in before[0].message
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_other.py").write_text("def t():\n    return 1\n", encoding="utf-8")
+    after = _sc503([pkg, tests])
+    assert len(after) == 1
+    assert after[0].message == before[0].message
+
+
+# ---------------------------------------------------------------------------
+# 12. Submodule receivers resolve for SC703
+# ---------------------------------------------------------------------------
+
+
+def test_from_import_submodule_is_indirect_blocking(tmp_path: Path) -> None:
+    """``from pkg import b`` then ``b.fetch()`` traces into ``pkg.b``."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "b.py").write_text(
+        "import time\n\ndef fetch():\n    time.sleep(1)\n", encoding="utf-8"
+    )
+    (tmp_path / "app.py").write_text(
+        "import asyncio\nfrom pkg import b\n\nasync def run():\n    b.fetch()\n",
+        encoding="utf-8",
+    )
+    findings = scan_paths([pkg, tmp_path / "app.py"], use_cache=False)
+    messages = [f.message for f in findings if f.pattern == "SC703"]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
+
+def test_dotted_receiver_is_indirect_blocking(tmp_path: Path) -> None:
+    """``import pkg.helpers`` then ``pkg.helpers.fetch()`` traces the helper."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "helpers.py").write_text(
+        "import time\n\ndef fetch():\n    time.sleep(1)\n", encoding="utf-8"
+    )
+    (tmp_path / "app.py").write_text(
+        "import asyncio\nimport pkg.helpers\n\nasync def run():\n    pkg.helpers.fetch()\n",
+        encoding="utf-8",
+    )
+    findings = scan_paths([pkg, tmp_path / "app.py"], use_cache=False)
+    messages = [f.message for f in findings if f.pattern == "SC703"]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
+
+
+# ---------------------------------------------------------------------------
+# 13. Function-local imports win over module-level bindings
+# ---------------------------------------------------------------------------
+
+
+def test_function_local_import_is_not_shadowed_by_module_definition(
+    tmp_path: Path,
+) -> None:
+    """A local ``from b import fetch`` wins over a global blocking ``def fetch``."""
+    (tmp_path / "b.py").write_text("async def fetch():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "a.py").write_text(
+        "import time\n\n"
+        "def fetch():\n    time.sleep(1)\n\n"
+        "async def run():\n"
+        "    from b import fetch\n"
+        "    await fetch()\n",
+        encoding="utf-8",
+    )
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    indirect = [
+        f for f in findings if f.pattern == "SC703" and "Indirect blocking" in f.message
+    ]
+    assert indirect == []
+
+
+def test_function_local_import_overrides_module_import(tmp_path: Path) -> None:
+    """A local ``from blocking import fetch`` wins over ``from safe import fetch``."""
+    (tmp_path / "safe.py").write_text("async def fetch():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "blocking.py").write_text(
+        "import time\n\ndef fetch():\n    time.sleep(1)\n", encoding="utf-8"
+    )
+    (tmp_path / "a.py").write_text(
+        "from safe import fetch\n\n"
+        "async def run():\n"
+        "    from blocking import fetch\n"
+        "    fetch()\n",
+        encoding="utf-8",
+    )
+    findings = scan_paths(
+        [tmp_path / "a.py", tmp_path / "safe.py", tmp_path / "blocking.py"],
+        use_cache=False,
+    )
+    messages = [
+        f.message
+        for f in findings
+        if f.pattern == "SC703" and "Indirect blocking" in f.message
+    ]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
+
+# ---------------------------------------------------------------------------
+# 14. Closure captures ignore nested definitions and globals
+# ---------------------------------------------------------------------------
+
+
+def test_nested_definition_shadows_outer_parameter(tmp_path: Path) -> None:
+    """A nested ``def`` of the same name is not a capture of the parameter."""
+    path = _write_py(
+        tmp_path,
+        """\
+        def make(offset):
+            def middle():
+                def offset():
+                    return 1
+                return offset
+            return middle
+        """,
+    )
+    findings = _patterns(scan_path(path), "SC208")
+    assert any("make" in f.message and "offset" in f.message for f in findings)
+
+
+def test_global_read_is_not_a_parameter_capture(tmp_path: Path) -> None:
+    """A ``global`` read resolves to the module namespace, not the parameter."""
+    path = _write_py(
+        tmp_path,
+        """\
+        offset = 0
+
+        def make(offset):
+            def middle():
+                global offset
+                return offset
+            return middle
+        """,
+    )
+    findings = _patterns(scan_path(path), "SC208")
+    assert any("make" in f.message and "offset" in f.message for f in findings)
+
+
+# ---------------------------------------------------------------------------
+# 15. Suppression reuses one comment map per file
+# ---------------------------------------------------------------------------
+
+
+def test_comment_map_is_built_once_per_file(tmp_path: Path, monkeypatch) -> None:
+    """Suppression filtering must not re-tokenize a file once per finding."""
+    from smellcheck import detector
+
+    source = "".join(f"def f{index}(a=[]):\n    return a\n\n" for index in range(50))
+    path = tmp_path / "many.py"
+    path.write_text(source, encoding="utf-8")
+
+    calls = {"count": 0}
+    real_comment_map = detector._comment_map
+
+    def counting_comment_map(source_lines):
+        calls["count"] += 1
+        return real_comment_map(source_lines)
+
+    monkeypatch.setattr(detector, "_comment_map", counting_comment_map)
+    findings = scan_paths([path], use_cache=False)
+    assert _patterns(findings, "SC701")
+    assert calls["count"] <= 2
+
+
+def test_scoped_import_bindings_survive_the_cache(tmp_path: Path) -> None:
+    """A warm cache keeps the function-local import binding used by SC703."""
+    (tmp_path / "b.py").write_text("async def fetch():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "a.py").write_text(
+        "import time\n\n"
+        "def fetch():\n    time.sleep(1)\n\n"
+        "async def run():\n"
+        "    from b import fetch\n"
+        "    await fetch()\n",
+        encoding="utf-8",
+    )
+    targets = [tmp_path / "a.py", tmp_path / "b.py"]
+    cache_dir = tmp_path / "cache"
+    fresh = [(f.pattern, f.message) for f in scan_paths(targets, use_cache=False)]
+    scan_paths(targets, cache_dir=cache_dir)  # populate the cache
+    cached = [(f.pattern, f.message) for f in scan_paths(targets, cache_dir=cache_dir)]
+    assert cached == fresh
+

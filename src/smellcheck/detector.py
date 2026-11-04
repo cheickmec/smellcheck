@@ -1080,7 +1080,7 @@ def _resolve_extends(
 # ---------------------------------------------------------------------------
 
 _DEFAULT_CACHE_DIR: Final = ".smellcheck-cache"
-_CACHE_VERSION: Final = 5
+_CACHE_VERSION: Final = 6
 
 
 def _cache_file_id(path: Path) -> str:
@@ -1247,6 +1247,13 @@ def _serialize_file_data(fd: FileData) -> dict:
             name: [level, module, func]
             for name, (level, module, func) in fd.import_bindings.items()
         },
+        "scoped_import_bindings": {
+            scope: {
+                name: [level, module, func]
+                for name, (level, module, func) in bindings.items()
+            }
+            for scope, bindings in fd.scoped_import_bindings.items()
+        },
         "function_call_sites": {
             key: [list(site) for site in sites]
             for key, sites in fd.function_call_sites.items()
@@ -1281,6 +1288,27 @@ def _coerce_import_bindings(raw: object) -> dict[str, tuple[int, str, str]]:
             level, module, func = value
             bindings[str(name)] = (int(level), str(module), str(func))
     return bindings
+
+
+def _coerce_scoped_import_bindings(
+    raw: object,
+) -> dict[str, dict[str, tuple[int, str, str]]]:
+    """Restore per-scope import bindings from a cache payload.
+
+    Args:
+        raw: JSON object mapping scope keys to binding maps.
+
+    Returns:
+        Scope key to binding map. Empty scopes are dropped.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    scoped: dict[str, dict[str, tuple[int, str, str]]] = {}
+    for scope, value in raw.items():
+        bindings = _coerce_import_bindings(value)
+        if bindings:
+            scoped[str(scope)] = bindings
+    return scoped
 
 
 def _coerce_call_sites(raw: object) -> dict[str, list[tuple[str, str, str, int]]]:
@@ -1333,6 +1361,9 @@ def _deserialize_file_data(d: dict) -> FileData:
         async_module_functions=set(d.get("async_module_functions", [])),
         async_methods=set(d.get("async_methods", [])),
         import_bindings=_coerce_import_bindings(d.get("import_bindings", {})),
+        scoped_import_bindings=_coerce_scoped_import_bindings(
+            d.get("scoped_import_bindings", {})
+        ),
         function_call_sites=_coerce_call_sites(d.get("function_call_sites", {})),
         function_calls_map={k: set(v) for k, v in d.get("function_calls_map", {}).items()},
         function_call_lines_map=d.get("function_call_lines_map", {}),
@@ -1601,16 +1632,34 @@ def _comment_map(source_lines: list[str]) -> dict[int, str]:
     return {line: " ".join(parts) for line, parts in comments.items()}
 
 
-def _noqa_suppressed(source_lines: list[str], line: int, pattern: str) -> bool:
+def _noqa_suppressed(
+    source_lines: list[str],
+    line: int,
+    pattern: str,
+    comment_map: dict[int, str] | None = None,
+) -> bool:
     """Return True if *line* (1-based) has a ``# noqa`` that covers *pattern*.
 
     ``# noqa`` alone suppresses everything.
     ``# noqa: SC701,SC601`` suppresses only the listed codes.
     Only real comments count; the same text inside a string does not.
+
+    Args:
+        source_lines: Source split into lines without terminators.
+        line: 1-based line the finding is reported on.
+        pattern: SC code the finding belongs to.
+        comment_map: Precomputed :func:`_comment_map` for *source_lines*.
+            Built on demand when omitted so callers that filter many
+            findings can share one map per file.
+
+    Returns:
+        True when the line carries a matching ``# noqa`` comment.
     """
     if line < 1 or line > len(source_lines):
         return False
-    text = _comment_map(source_lines).get(line, "")
+    if comment_map is None:
+        comment_map = _comment_map(source_lines)
+    text = comment_map.get(line, "")
     if not text:
         return False
     m = _NOQA_RE.search(text)
@@ -1641,6 +1690,7 @@ _DIRECTIVE_RE = re.compile(
 
 def _parse_block_directives(
     source_lines: list[str],
+    comment_map: dict[int, str] | None = None,
 ) -> tuple[dict[str, list[tuple[int, int]]], bool, set[str]]:
     """Parse ``# smellcheck:`` directives and build a suppression map.
 
@@ -1652,6 +1702,11 @@ def _parse_block_directives(
       codes) appears — suppress every code for the entire file.
     * *file_disabled_codes* is the set of SC codes suppressed for the
       entire file via ``# smellcheck: disable-file SC...``.
+
+    Args:
+        source_lines: Source split into lines without terminators.
+        comment_map: Precomputed :func:`_comment_map` for *source_lines*.
+            Built on demand when omitted.
     """
     total = len(source_lines)
     # Currently open disable ranges: code -> start line (1-based)
@@ -1662,7 +1717,7 @@ def _parse_block_directives(
     disable_all_file = False
     file_disabled_codes: set[str] = set()
 
-    comments = _comment_map(source_lines)
+    comments = comment_map if comment_map is not None else _comment_map(source_lines)
     for idx in range(1, total + 1):
         text = comments.get(idx, "")
         if not text:
@@ -1735,6 +1790,7 @@ def _is_suppressed(
     block_map: dict[str, list[tuple[int, int]]] | None = None,
     disable_all_file: bool = False,
     file_disabled_codes: frozenset[str] | None = None,
+    comment_map: dict[int, str] | None = None,
 ) -> bool:
     """Return True if a finding at *line* for *pattern* should be suppressed.
 
@@ -1744,7 +1800,7 @@ def _is_suppressed(
     3. Block-level ``# smellcheck: disable/enable`` ranges
     """
     # 1. Per-line noqa always wins
-    if _noqa_suppressed(source_lines, line, pattern):
+    if _noqa_suppressed(source_lines, line, pattern, comment_map=comment_map):
         return True
 
     # 2. File-wide suppression
@@ -1900,7 +1956,12 @@ def _function_parameters(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lamb
 
 
 def _stop_at_nested(node: ast.AST, visitor: Callable[[ast.AST], None]) -> None:
-    """Walk *node* but not nested functions, lambdas, classes, or comprehensions.
+    """Walk *node* without descending into nested scopes.
+
+    Nested functions, lambdas, classes, and comprehensions are not descended
+    into, but the nested scope node itself is still offered to *visitor* so a
+    caller can record the name a definition binds in this scope. Comprehension
+    ``:=`` targets are reported because they bind in the enclosing scope.
 
     Args:
         node: Scope whose immediate bindings are collected.
@@ -1908,6 +1969,7 @@ def _stop_at_nested(node: ast.AST, visitor: Callable[[ast.AST], None]) -> None:
     """
     def walk(current: ast.AST) -> None:
         if current is not node and isinstance(current, _NESTED_SCOPE):
+            visitor(current)
             return
         if current is not node and isinstance(current, _COMP_NODES):
             for inner in ast.walk(current):
@@ -1924,7 +1986,8 @@ def _names_bound_here(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
     """Names assigned in this function, ignoring nested scopes.
 
     ``nonlocal`` and ``global`` names are not local bindings, so a nested
-    function can still capture them.
+    function can still capture them. A nested ``def``/``class`` binds its own
+    name here, so it shadows an enclosing name of the same spelling.
 
     Args:
         node: Function or lambda scope.
@@ -1936,7 +1999,12 @@ def _names_bound_here(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
     skipped: set[str] = set()
 
     def visit(current: ast.AST) -> None:
-        if isinstance(current, (ast.Global, ast.Nonlocal)):
+        if (
+            current is not node
+            and isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ):
+            bound.add(current.name)
+        elif isinstance(current, (ast.Global, ast.Nonlocal)):
             skipped.update(current.names)
         elif isinstance(current, ast.Name) and isinstance(current.ctx, (ast.Store, ast.Del)):
             bound.add(current.id)
@@ -1950,6 +2018,28 @@ def _names_bound_here(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
 
     _stop_at_nested(node, visit)
     return bound - skipped
+
+
+def _globals_declared_here(node: ast.AST) -> set[str]:
+    """Names declared ``global`` directly in this scope.
+
+    A ``global`` read resolves to the module namespace, not to an enclosing
+    function's variable, so it is not a capture of that variable.
+
+    Args:
+        node: Scope whose ``global`` statements are collected.
+
+    Returns:
+        Names declared global in *node*, excluding nested scopes.
+    """
+    names: set[str] = set()
+
+    def visit(current: ast.AST) -> None:
+        if isinstance(current, ast.Global):
+            names.update(current.names)
+
+    _stop_at_nested(node, visit)
+    return names
 
 
 def _walk_comprehension(
@@ -2033,7 +2123,11 @@ def _names_used_in_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set
     def walk(current: ast.AST, shadowed: set[str]) -> None:
         if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             _note_signature_uses(current, shadowed, walk)
-            inner = shadowed | _names_bound_here(current)
+            inner = (
+                shadowed
+                | _names_bound_here(current)
+                | _globals_declared_here(current)
+            )
             body: list[ast.AST]
             if isinstance(current, ast.Lambda):
                 body = [current.body]
@@ -2133,6 +2227,30 @@ def _get_blocking_call_key(node: ast.Call) -> str | None:
             if key in _BLOCKING_CALLS:
                 return key
     return None
+
+
+def _dotted_name(node: ast.AST) -> str:
+    """Return the dotted source name of a ``Name``/``Attribute`` chain.
+
+    Used to keep a dotted receiver such as ``pkg.helpers`` intact for
+    ``pkg.helpers.fetch()`` instead of collapsing it to an empty string.
+
+    Args:
+        node: Expression used as an attribute receiver.
+
+    Returns:
+        ``"a.b.c"`` for a plain name chain, else ``""`` (e.g. ``f().x`` or
+        ``a[0].x``).
+    """
+    parts: list[str] = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        parts.append(current.id)
+        return ".".join(reversed(parts))
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -2353,6 +2471,35 @@ def _extract_import_bindings(tree: ast.Module) -> dict[str, tuple[int, str, str]
     return bindings
 
 
+def _extract_scoped_import_bindings(
+    tree: ast.Module, stem: str
+) -> dict[str, dict[str, tuple[int, str, str]]]:
+    """Collect import bindings per top-level callable scope.
+
+    Function-local imports must resolve before module-level ones, and imports
+    in one function must not leak into another. The scope key matches the
+    ``stem:function`` key used by the call-site maps.
+
+    Args:
+        tree: Parsed module.
+        stem: Module stem used to build the scope keys.
+
+    Returns:
+        ``scope key -> {local name -> (level, module, function)}``.
+    """
+    scoped: dict[str, dict[str, tuple[int, str, str]]] = {}
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        bindings: dict[str, tuple[int, str, str]] = {}
+        for child in _walk_skip_nested_scopes(node):
+            if isinstance(child, (ast.Import, ast.ImportFrom)):
+                _remember_import_binding(bindings, child)
+        if bindings:
+            scoped[f"{stem}:{node.name}"] = bindings
+    return scoped
+
+
 def _is_stub_body(body: list[ast.stmt]) -> bool:
     """Check if a function body is just pass, ..., or a docstring."""
     if not body:
@@ -2440,6 +2587,11 @@ class FileData:
     async_methods: set[str] = field(default_factory=set)
     # local name -> (level, module, imported function or "")
     import_bindings: dict[str, tuple[int, str, str]] = field(default_factory=dict)
+    # "stem:function" -> {local name -> binding} for imports made inside that
+    # callable, so function-local imports are resolved before module-level ones.
+    scoped_import_bindings: dict[str, dict[str, tuple[int, str, str]]] = field(
+        default_factory=dict
+    )
     # qualified name -> [(kind, name, receiver, line)]
     function_call_sites: dict[str, list[tuple[str, str, str, int]]] = field(
         default_factory=dict
@@ -3655,9 +3807,7 @@ class SmellDetector(ast.NodeVisitor):
                     callees.add(callee_bare)
                     if callee_bare not in call_lines:
                         call_lines[callee_bare] = child.lineno
-                    receiver = ""
-                    if isinstance(child.func.value, ast.Name):
-                        receiver = child.func.value.id
+                    receiver = _dotted_name(child.func.value)
                     sites.append(("attr", callee_bare, receiver, child.lineno))
                 # Track blocking calls within this function
                 key = _get_blocking_call_key(child)
@@ -4126,6 +4276,9 @@ def scan_file(
     detector.finalize()
     detector.file_data.imports = _extract_imports(tree)
     detector.file_data.import_bindings = _extract_import_bindings(tree)
+    detector.file_data.scoped_import_bindings = _extract_scoped_import_bindings(
+        tree, Path(filepath).stem
+    )
 
     # Populate SC509 lazy-module fields from the AST
     detector.file_data.is_init = filepath.name == "__init__.py"
@@ -4255,8 +4408,12 @@ def _detect_duplicate_functions(all_data: list[FileData]) -> list[Finding]:
 def _import_root(paths: list[Path]) -> Path:
     """Choose the directory dotted module names are relative to.
 
-    The root walks up through enclosing packages so ``import pkg.mod`` keeps
-    the ``pkg`` prefix when ``pkg/__init__.py`` exists.
+    The root is derived from the package structure rather than from every
+    scanned file, so adding an unrelated file (for example ``tests/``) to a
+    scan does not rename modules that already have a stable package root.
+    Directories that contain an ``__init__.py`` are packages; the root is the
+    parent of the outermost such package. When no scanned file lives inside a
+    package, the root falls back to the common parent of the files.
 
     Args:
         paths: Files participating in this scan.
@@ -4265,20 +4422,31 @@ def _import_root(paths: list[Path]) -> Path:
         Directory whose children are top-level modules and packages.
     """
     parents: list[Path] = []
+    package_dirs: set[Path] = set()
     for path in paths:
         try:
-            parents.append(path.resolve().parent)
+            resolved = path.resolve()
         except OSError:
-            parents.append(path.parent)
+            resolved = path
+        parents.append(resolved.parent)
+        directory = resolved.parent
+        while (directory / "__init__.py").is_file():
+            package_dirs.add(directory)
+            if directory == directory.parent:
+                break
+            directory = directory.parent
     if not parents:
         return Path.cwd()
+    if package_dirs:
+        outermost = [d for d in package_dirs if d.parent not in package_dirs]
+        try:
+            return Path(os.path.commonpath([str(d.parent) for d in outermost]))
+        except ValueError:
+            pass
     try:
-        root = Path(os.path.commonpath([str(parent) for parent in parents]))
+        return Path(os.path.commonpath([str(parent) for parent in parents]))
     except ValueError:
-        root = parents[0]
-    while root != root.parent and (root / "__init__.py").is_file():
-        root = root.parent
-    return root
+        return parents[0]
 
 
 def _module_name_for(filepath: str, root: Path) -> str:
@@ -4440,6 +4608,8 @@ def _build_import_graph(
     all_data: list[FileData],
     module_map: dict[str, str],
     reverse_map: dict[str, str],
+    *,
+    drop_ancestor_edges: bool = False,
 ) -> dict[str, set[str]]:
     """Build a directed import graph from dotted module identities.
 
@@ -4447,6 +4617,10 @@ def _build_import_graph(
         all_data: Per-file metadata, including structured imports.
         module_map: File path to dotted module name.
         reverse_map: Dotted module name to file path.
+        drop_ancestor_edges: When True, skip edges to a package that strictly
+            contains the importing module. Those edges only reflect the
+            implicit loading of an already-initializing parent package, so
+            they must not create import cycles.
 
     Returns:
         Graph of module name to the modules it imports. Edges point only at
@@ -4463,8 +4637,11 @@ def _build_import_graph(
                 src_module, ref, is_package=is_package, known=known
             )
             for target in found:
-                if target != src_module:
-                    import_graph[src_module].add(target)
+                if target == src_module:
+                    continue
+                if drop_ancestor_edges and src_module.startswith(target + "."):
+                    continue
+                import_graph[src_module].add(target)
     return import_graph
 
 
@@ -4515,7 +4692,12 @@ def _tarjan_scc(graph: dict[str, set[str]]) -> list[list[str]]:
 def _detect_cyclic_imports(all_data: list[FileData]) -> list[Finding]:
     """SC503 -- Circular imports via Tarjan SCC on intra-project import graph."""
     module_map, reverse_map = _build_module_maps(all_data)
-    import_graph = _build_import_graph(all_data, module_map, reverse_map)
+    # Implicit parent-package loads (``pkg.a`` -> ``pkg``) are not real
+    # dependencies, so they are excluded or every package that re-exports a
+    # submodule would look circular.
+    import_graph = _build_import_graph(
+        all_data, module_map, reverse_map, drop_ancestor_edges=True
+    )
 
     sccs = _tarjan_scc(import_graph)
 
@@ -5123,6 +5305,46 @@ def _call_qname(filepath: str, name: str) -> str:
     return f"{Path(filepath).stem}:{name}"
 
 
+def _binding_module_name(
+    importer: FileData,
+    level: int,
+    module: str,
+    module_map: dict[str, str],
+    reverse_map: dict[str, str],
+) -> str | None:
+    """Resolve an import binding to the dotted module it names.
+
+    Args:
+        importer: File that contains the import.
+        level: Relative import level. Zero means absolute.
+        module: Dotted module, or empty for ``from . import name``.
+        module_map: File path to dotted module name.
+        reverse_map: Dotted module name to file path.
+
+    Returns:
+        Dotted module name, or None when it is not part of the scan.
+    """
+    src = module_map.get(importer.filepath)
+    if src is None:
+        return None
+    known = set(reverse_map)
+    is_package = Path(importer.filepath).name == "__init__.py"
+    targets = _resolve_imported_modules(
+        src, (level, module, ()), is_package=is_package, known=known
+    )
+    specific = [
+        name for name in targets
+        if module and (name == module or name.endswith("." + module))
+    ]
+    if specific:
+        return max(specific, key=len)
+    if len(targets) == 1:
+        return next(iter(targets))
+    if level == 0 and module and module in reverse_map:
+        return module
+    return None
+
+
 def _binding_file(
     importer: FileData,
     level: int,
@@ -5142,25 +5364,49 @@ def _binding_file(
     Returns:
         File path of the imported module, or None when it is not in the scan.
     """
-    src = module_map.get(importer.filepath)
-    if src is None:
+    name = _binding_module_name(importer, level, module, module_map, reverse_map)
+    return reverse_map.get(name) if name else None
+
+
+def _resolve_attr_module(
+    caller: FileData,
+    receiver: str,
+    module_map: dict[str, str],
+    reverse_map: dict[str, str],
+    scoped: dict[str, tuple[int, str, str]],
+) -> str | None:
+    """Resolve a dotted attribute receiver to a scanned module file path.
+
+    Handles ``import pkg.helpers`` (``pkg.helpers.fetch()``), ``from pkg
+    import helpers`` (``helpers.fetch()``) and aliases, including a member
+    that names a submodule rather than a function.
+
+    Args:
+        caller: File containing the attribute call.
+        receiver: Dotted receiver text, e.g. ``"pkg.helpers"``.
+        module_map: File path to dotted module name.
+        reverse_map: Dotted module name to file path.
+        scoped: Function-local import bindings for the calling scope.
+
+    Returns:
+        File path of the module the receiver refers to, or None.
+    """
+    parts = [part for part in receiver.split(".") if part]
+    if not parts:
         return None
-    known = set(reverse_map)
-    is_package = Path(importer.filepath).name == "__init__.py"
-    targets = _resolve_imported_modules(
-        src, (level, module, ()), is_package=is_package, known=known
-    )
-    specific = [
-        name for name in targets
-        if module and (name == module or name.endswith("." + module))
-    ]
-    if specific:
-        return reverse_map.get(max(specific, key=len))
-    if len(targets) == 1:
-        return reverse_map.get(next(iter(targets)))
-    if level == 0 and module and module in reverse_map:
-        return reverse_map[module]
-    return None
+    root, tail = parts[0], parts[1:]
+    binding = scoped.get(root) or caller.import_bindings.get(root)
+    if binding is None:
+        return None
+    level, module, func = binding
+    dotted = _binding_module_name(caller, level, module, module_map, reverse_map)
+    if dotted is None:
+        return None
+    if func:
+        dotted = f"{dotted}.{func}" if dotted else func
+    for part in tail:
+        dotted = f"{dotted}.{part}" if dotted else part
+    return reverse_map.get(dotted)
 
 
 def _resolve_call_target(
@@ -5171,6 +5417,7 @@ def _resolve_call_target(
     by_path: dict[str, FileData],
     module_map: dict[str, str],
     reverse_map: dict[str, str],
+    scope_key: str = "",
 ) -> tuple[FileData, str, bool] | None:
     """Bind one call to the function it actually invokes.
 
@@ -5178,43 +5425,43 @@ def _resolve_call_target(
         caller: File containing the call.
         kind: ``name`` for ``func()`` or ``attr`` for ``obj.func()``.
         name: Called attribute or function name.
-        receiver: Object name for an attribute call, else empty.
+        receiver: Dotted object name for an attribute call, else empty.
         by_path: File path to file metadata.
         module_map: File path to dotted module name.
         reverse_map: Dotted module name to file path.
+        scope_key: Qualified name of the calling function. Function-local
+            import bindings take precedence over module-level ones.
 
     Returns:
         ``(defining file, function name, is_method)`` or None when the
         callee is unresolved. Unrelated same-named functions are not used.
     """
-    if kind == "name" and name in caller.module_level_functions:
-        return caller, name, False
+    scoped = caller.scoped_import_bindings.get(scope_key, {}) if scope_key else {}
+
     if kind == "attr" and receiver in ("self", "cls"):
         if name in caller.defined_functions:
             return caller, name, True
         return None
+
     if kind == "attr":
-        binding = caller.import_bindings.get(receiver)
-        if binding is None or binding[2]:
-            return None
-        path = _binding_file(caller, binding[0], binding[1], module_map, reverse_map)
+        path = _resolve_attr_module(caller, receiver, module_map, reverse_map, scoped)
         target = by_path.get(path or "")
         if target is not None and name in target.module_level_functions:
             return target, name, False
         return None
-    binding = caller.import_bindings.get(name)
-    if binding is None:
-        return None
-    level, module, func = binding
-    if not func:
-        return None
-    if level and not module:
-        path = _binding_file(caller, level, "", module_map, reverse_map)
-    else:
+
+    # A ``name`` call: a local import wins over a module-level definition, so
+    # a function-local ``from b import fetch`` is not shadowed by a global
+    # ``def fetch``.
+    binding = scoped.get(name) or caller.import_bindings.get(name)
+    if binding is not None and binding[2]:
+        level, module, func = binding
         path = _binding_file(caller, level, module, module_map, reverse_map)
-    target = by_path.get(path or "")
-    if target is not None and func in target.module_level_functions:
-        return target, func, False
+        target = by_path.get(path or "")
+        if target is not None and func in target.module_level_functions:
+            return target, func, False
+    if name in caller.module_level_functions:
+        return caller, name, False
     return None
 
 
@@ -5264,7 +5511,7 @@ def _detect_indirect_blocking(all_data: list[FileData]) -> list[Finding]:
             return [name, blockers[0][1]]
         for kind, callee, receiver, _line in fd.function_call_sites.get(qname, []):
             resolved = _resolve_call_target(
-                fd, kind, callee, receiver, by_path, module_map, reverse_map
+                fd, kind, callee, receiver, by_path, module_map, reverse_map, qname
             )
             if resolved is None:
                 continue
@@ -5283,7 +5530,7 @@ def _detect_indirect_blocking(all_data: list[FileData]) -> list[Finding]:
             reported: set[tuple[str, int]] = set()
             for kind, callee, receiver, line in fd.function_call_sites.get(qname, []):
                 resolved = _resolve_call_target(
-                    fd, kind, callee, receiver, by_path, module_map, reverse_map
+                    fd, kind, callee, receiver, by_path, module_map, reverse_map, qname
                 )
                 if resolved is None or _callee_is_async(resolved[0], resolved[1], resolved[2]):
                     continue
@@ -5671,6 +5918,9 @@ def scan_paths(
 
     # --- Apply inline + block suppression ---
     source_cache: dict[str, list[str]] = {}
+    # One tokenized comment map per file, shared by noqa and block checks so
+    # suppression stays O(findings) instead of re-tokenizing per finding.
+    comment_cache: dict[str, dict[int, str]] = {}
     directive_cache: dict[
         str,
         tuple[dict[str, list[tuple[int, int]]], bool, frozenset[str]],
@@ -5684,13 +5934,18 @@ def scan_paths(
                 )
             except Exception:
                 source_cache[f.file] = []
+        if f.file not in comment_cache:
+            comment_cache[f.file] = _comment_map(source_cache[f.file])
         if f.file not in directive_cache:
-            bm, daf, fdc = _parse_block_directives(source_cache[f.file])
+            bm, daf, fdc = _parse_block_directives(
+                source_cache[f.file], comment_cache[f.file]
+            )
             directive_cache[f.file] = (bm, daf, frozenset(fdc))
         bm, daf, fdc = directive_cache[f.file]
         if not _is_suppressed(
             source_cache[f.file], f.line, f.pattern,
             block_map=bm, disable_all_file=daf, file_disabled_codes=fdc,
+            comment_map=comment_cache[f.file],
         ):
             filtered.append(f)
     all_findings = filtered
