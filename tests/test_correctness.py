@@ -1204,3 +1204,46 @@ def test_absolute_submodule_resolves_without_scanned_initializer(
     messages = [f.message for f in findings if f.pattern == "SC703"]
     assert any("run -> fetch -> time.sleep" in message for message in messages)
 
+# ---------------------------------------------------------------------------
+# 19. Module-scope precedence and exact binding modules
+# ---------------------------------------------------------------------------
+
+
+def test_module_definition_replaces_import(tmp_path: Path) -> None:
+    """A module-level def after an import wins at runtime, so no false SC703."""
+    (tmp_path / "b.py").write_text(
+        "import time\n\ndef fetch():\n    time.sleep(1)\n", encoding="utf-8"
+    )
+    (tmp_path / "a.py").write_text(
+        "from b import fetch\n\n"
+        "async def fetch():\n    return 1\n\n"
+        "async def run():\n    await fetch()\n",
+        encoding="utf-8",
+    )
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    indirect = [
+        f for f in findings if f.pattern == "SC703" and "Indirect blocking" in f.message
+    ]
+    assert indirect == []
+
+
+def test_relative_submodule_uses_exact_module_not_ancestor(tmp_path: Path) -> None:
+    """``from .sub import b`` resolves ``pkg.sub.b``, not the scanned ancestor."""
+    pkg = tmp_path / "pkg"
+    (pkg / "sub").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "sub" / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "sub" / "b.py").write_text(
+        "import time\n\ndef fetch():\n    time.sleep(1)\n", encoding="utf-8"
+    )
+    (pkg / "a.py").write_text(
+        "import asyncio\nfrom .sub import b\n\nasync def run():\n    b.fetch()\n",
+        encoding="utf-8",
+    )
+    # Explicit file list omits pkg/sub/__init__.py.
+    findings = scan_paths(
+        [pkg / "__init__.py", pkg / "a.py", pkg / "sub" / "b.py"], use_cache=False
+    )
+    messages = [f.message for f in findings if f.pattern == "SC703"]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+

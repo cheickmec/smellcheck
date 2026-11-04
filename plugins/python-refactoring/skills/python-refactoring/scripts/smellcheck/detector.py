@@ -5348,51 +5348,36 @@ def _binding_module_name(
     level: int,
     module: str,
     module_map: dict[str, str],
-    reverse_map: dict[str, str],
 ) -> str | None:
-    """Resolve an import binding to the dotted module it names.
+    """Resolve an import binding to the exact dotted module it names.
+
+    The module named by the binding is returned regardless of whether it is
+    part of the scan; callers append the imported member and only require the
+    final target to be present. Ancestor-loading edges are deliberately not
+    used here, so an unrelated scanned ancestor cannot stand in for the real
+    module.
 
     Args:
         importer: File that contains the import.
         level: Relative import level. Zero means absolute.
         module: Dotted module, or empty for ``from . import name``.
         module_map: File path to dotted module name.
-        reverse_map: Dotted module name to file path.
 
     Returns:
-        Dotted module name, or None when it is not part of the scan.
+        Dotted module name, or None when it cannot be determined.
     """
     src = module_map.get(importer.filepath)
     if src is None:
         return None
-    known = set(reverse_map)
+    if level == 0:
+        return module or None
     is_package = Path(importer.filepath).name == "__init__.py"
-    if level and not module:
-        # ``from . import name`` names a member of the exact relative package.
-        # ``_resolve_imported_modules`` would also add ancestor-loading edges,
-        # making the single target ambiguous, so resolve the package directly.
-        # The package initializer itself need not be in the scan; the caller
-        # only requires the final submodule target to be present.
-        relative = _relative_package(src, is_package, level)
-        if relative:
-            return relative
+    relative = _relative_package(src, is_package, level)
+    if relative is None:
         return None
-    targets = _resolve_imported_modules(
-        src, (level, module, ()), is_package=is_package, known=known
-    )
-    specific = [
-        name for name in targets
-        if module and (name == module or name.endswith("." + module))
-    ]
-    if specific:
-        return max(specific, key=len)
-    if len(targets) == 1:
-        return next(iter(targets))
-    if level == 0 and module:
-        # An absolute base module need not be in the scan; the caller appends
-        # the member and only requires the final target to be present.
-        return module
-    return None
+    if module:
+        return f"{relative}.{module}" if relative else module
+    return relative or None
 
 
 def _binding_file(
@@ -5414,7 +5399,7 @@ def _binding_file(
     Returns:
         File path of the imported module, or None when it is not in the scan.
     """
-    name = _binding_module_name(importer, level, module, module_map, reverse_map)
+    name = _binding_module_name(importer, level, module, module_map)
     return reverse_map.get(name) if name else None
 
 
@@ -5449,7 +5434,7 @@ def _resolve_attr_module(
     if binding is None:
         return None
     level, module, func = binding
-    dotted = _binding_module_name(caller, level, module, module_map, reverse_map)
+    dotted = _binding_module_name(caller, level, module, module_map)
     if dotted is None:
         return None
     if func:
@@ -5500,18 +5485,26 @@ def _resolve_call_target(
             return target, name, False
         return None
 
-    # A ``name`` call: a local import wins over a module-level definition, so
-    # a function-local ``from b import fetch`` is not shadowed by a global
-    # ``def fetch``.
-    binding = scoped.get(name) or caller.import_bindings.get(name)
+    # A ``name`` call. A function- or method-local import shadows every other
+    # binding in that scope; at module scope a definition that replaces an
+    # earlier import wins over the stale import binding.
+    local = scoped.get(name)
+    if local is not None and local[2]:
+        level, module, func = local
+        path = _binding_file(caller, level, module, module_map, reverse_map)
+        target = by_path.get(path or "")
+        if target is not None and func in target.module_level_functions:
+            return target, func, False
+        return None
+    if name in caller.module_level_functions:
+        return caller, name, False
+    binding = caller.import_bindings.get(name)
     if binding is not None and binding[2]:
         level, module, func = binding
         path = _binding_file(caller, level, module, module_map, reverse_map)
         target = by_path.get(path or "")
         if target is not None and func in target.module_level_functions:
             return target, func, False
-    if name in caller.module_level_functions:
-        return caller, name, False
     return None
 
 
