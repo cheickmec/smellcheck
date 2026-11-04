@@ -5688,9 +5688,11 @@ def _resolve_call_target(
     if kind == "attr":
         path = _resolve_attr_module(caller, receiver, module_map, reverse_map, scoped)
         target = by_path.get(path or "")
-        if target is not None and name in target.module_level_functions:
-            return target, name, False
-        return None
+        if target is None:
+            return None
+        return _resolve_name_in_file(
+            target, name, by_path, module_map, reverse_map, set()
+        )
 
     # A ``name`` call. A function- or method-local import shadows every other
     # binding in that scope. At module scope the binding that runs last wins,

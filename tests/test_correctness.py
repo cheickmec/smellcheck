@@ -1300,3 +1300,24 @@ def test_namespace_package_identity_is_stable(tmp_path: Path) -> None:
     assert "pkg.a" in findings[0].message
     assert "pkg.b" in findings[0].message
 
+# ---------------------------------------------------------------------------
+# 21. Attribute calls follow re-exports
+# ---------------------------------------------------------------------------
+
+
+def test_attribute_call_follows_re_export(tmp_path: Path) -> None:
+    """``b.fetch()`` resolves ``fetch`` re-exported by ``b`` from ``c`` -> SC703."""
+    (tmp_path / "a.py").write_text(
+        "import asyncio\nimport b\n\nasync def run():\n    b.fetch()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "b.py").write_text("from c import fetch\n", encoding="utf-8")
+    (tmp_path / "c.py").write_text(
+        "import time\n\ndef fetch():\n    time.sleep(1)\n", encoding="utf-8"
+    )
+    findings = scan_paths(
+        [tmp_path / "a.py", tmp_path / "b.py", tmp_path / "c.py"], use_cache=False
+    )
+    messages = [f.message for f in findings if f.pattern == "SC703"]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
