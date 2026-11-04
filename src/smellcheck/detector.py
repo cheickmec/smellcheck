@@ -1080,7 +1080,7 @@ def _resolve_extends(
 # ---------------------------------------------------------------------------
 
 _DEFAULT_CACHE_DIR: Final = ".smellcheck-cache"
-_CACHE_VERSION: Final = 6
+_CACHE_VERSION: Final = 7
 
 
 def _cache_file_id(path: Path) -> str:
@@ -1254,6 +1254,8 @@ def _serialize_file_data(fd: FileData) -> dict:
             }
             for scope, bindings in fd.scoped_import_bindings.items()
         },
+        "module_import_lines": fd.module_import_lines,
+        "module_function_lines": fd.module_function_lines,
         "function_call_sites": {
             key: [list(site) for site in sites]
             for key, sites in fd.function_call_sites.items()
@@ -1364,6 +1366,12 @@ def _deserialize_file_data(d: dict) -> FileData:
         scoped_import_bindings=_coerce_scoped_import_bindings(
             d.get("scoped_import_bindings", {})
         ),
+        module_import_lines={
+            str(k): int(v) for k, v in d.get("module_import_lines", {}).items()
+        },
+        module_function_lines={
+            str(k): int(v) for k, v in d.get("module_function_lines", {}).items()
+        },
         function_call_sites=_coerce_call_sites(d.get("function_call_sites", {})),
         function_calls_map={k: set(v) for k, v in d.get("function_calls_map", {}).items()},
         function_call_lines_map=d.get("function_call_lines_map", {}),
@@ -2486,6 +2494,33 @@ def _extract_import_bindings(tree: ast.Module) -> dict[str, tuple[int, str, str]
     return bindings
 
 
+def _extract_module_import_lines(tree: ast.Module) -> dict[str, int]:
+    """Map module-scope local names to the line of their last import.
+
+    Used to compare an import against a module-level definition of the same
+    name so the binding that runs last wins.
+
+    Args:
+        tree: Parsed module.
+
+    Returns:
+        ``local name -> line number`` for module-scope imports.
+    """
+    lines: dict[str, int] = {}
+    for node in _iter_module_imports(tree, include_class_bodies=False):
+        if isinstance(node, ast.Import):
+            locals_ = (alias.asname or alias.name.split(".")[0] for alias in node.names)
+        else:
+            locals_ = (
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name != "*"
+            )
+        for local in locals_:
+            lines[local] = node.lineno
+    return lines
+
+
 def _iter_scoped_functions(node: ast.AST) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDef]:
     """Yield functions and methods that are not nested inside another function.
 
@@ -2629,6 +2664,10 @@ class FileData:
     scoped_import_bindings: dict[str, dict[str, tuple[int, str, str]]] = field(
         default_factory=dict
     )
+    # name -> line of the last module-scope import binding for that name
+    module_import_lines: dict[str, int] = field(default_factory=dict)
+    # name -> line of a module-level function definition
+    module_function_lines: dict[str, int] = field(default_factory=dict)
     # qualified name -> [(kind, name, receiver, line)]
     function_call_sites: dict[str, list[tuple[str, str, str, int]]] = field(
         default_factory=dict
@@ -3814,6 +3853,7 @@ class SmellDetector(ast.NodeVisitor):
                 self.file_data.async_methods.add(node.name)
         else:
             self.file_data.module_level_functions.add(node.name)
+            self.file_data.module_function_lines[node.name] = node.lineno
             if isinstance(node, ast.AsyncFunctionDef):
                 self.file_data.async_module_functions.add(node.name)
 
@@ -4313,6 +4353,7 @@ def scan_file(
     detector.finalize()
     detector.file_data.imports = _extract_imports(tree)
     detector.file_data.import_bindings = _extract_import_bindings(tree)
+    detector.file_data.module_import_lines = _extract_module_import_lines(tree)
     detector.file_data.scoped_import_bindings = _extract_scoped_import_bindings(
         tree, Path(filepath).stem
     )
@@ -4470,16 +4511,77 @@ def _fallback_root(paths: list[Path]) -> Path:
         return parents[0]
 
 
-def _module_name_for(filepath: str, fallback_root: Path) -> str:
+def _contains_python_file(directory: Path, cache: dict[Path, bool]) -> bool:
+    """Return whether *directory* directly contains a Python file.
+
+    Args:
+        directory: Directory to inspect.
+        cache: Memo of previous answers.
+
+    Returns:
+        True when a ``*.py`` file lives directly in *directory*.
+    """
+    cached = cache.get(directory)
+    if cached is None:
+        try:
+            cached = any(
+                child.suffix == ".py" and child.is_file()
+                for child in directory.iterdir()
+            )
+        except OSError:
+            cached = False
+        cache[directory] = cached
+    return cached
+
+
+def _namespace_root(
+    start: Path, fallback_root: Path, cache: dict[Path, bool]
+) -> Path:
+    """Root for a file that is not inside a regular package.
+
+    Walks up while each ancestor directory directly holds Python files, so a
+    namespace package such as ``src/pkg`` (no ``__init__.py``) is named ``pkg``
+    relative to ``src`` rather than to an unrelated common ancestor. The result
+    never climbs above *fallback_root*.
+
+    Args:
+        start: Directory that contains the file.
+        fallback_root: Shared root of the whole scan.
+        cache: Memo for the directory probe.
+
+    Returns:
+        Directory the module name is relative to.
+    """
+    container = start
+    directory = start
+    while _contains_python_file(directory, cache):
+        container = directory
+        if directory == directory.parent:
+            break
+        directory = directory.parent
+    if container == container.parent:
+        return container
+    root = container.parent
+    if root != fallback_root and root in fallback_root.parents:
+        return fallback_root
+    return root
+
+
+def _module_name_for(
+    filepath: str, fallback_root: Path, py_dir_cache: dict[Path, bool]
+) -> str:
     """Return the dotted module name of a file.
 
-    A file inside a package is named from its own package boundary, so an
-    unrelated package in the same scan cannot rename it. A file that is not
-    inside a package is named relative to *fallback_root*.
+    A file inside a regular package is named from its own package boundary, so
+    an unrelated package in the same scan cannot rename it. A file in a
+    namespace package (a directory without ``__init__.py``) is named from the
+    outermost ancestor directory that directly holds Python files. Other loose
+    files are named relative to *fallback_root*.
 
     Args:
         filepath: Source file path stored on ``FileData``.
         fallback_root: Root for files that are not inside any package.
+        py_dir_cache: Memo for "directory directly contains a Python file".
 
     Returns:
         Dotted module name. Package initializers omit ``__init__``.
@@ -4496,7 +4598,10 @@ def _module_name_for(filepath: str, fallback_root: Path) -> str:
         if directory == directory.parent:
             break
         directory = directory.parent
-    root = directory if package_dirs else fallback_root
+    if package_dirs:
+        root = directory
+    else:
+        root = _namespace_root(resolved.parent, fallback_root, py_dir_cache)
     try:
         rel = resolved.relative_to(root)
     except (OSError, ValueError):
@@ -4533,10 +4638,11 @@ def _build_module_maps(
         ``(filepath -> module, module -> filepath)``.
     """
     fallback_root = _fallback_root([Path(fd.filepath) for fd in all_data])
+    py_dir_cache: dict[Path, bool] = {}
     module_map: dict[str, str] = {}
     used: dict[str, str] = {}
     for fd in all_data:
-        name = _module_name_for(fd.filepath, fallback_root)
+        name = _module_name_for(fd.filepath, fallback_root, py_dir_cache)
         if name in used and used[name] != fd.filepath:
             suffix = 2
             candidate = f"{name}#{suffix}"
@@ -5444,6 +5550,107 @@ def _resolve_attr_module(
     return reverse_map.get(dotted)
 
 
+def _module_name_binding(fd: FileData, name: str) -> str:
+    """Return the winning module-scope binding kind for *name*.
+
+    A module-level definition and an import of the same name are ordered by
+    source line: whichever runs last at import time is the binding that a call
+    resolves to.
+
+    Args:
+        fd: File whose module scope is inspected.
+        name: Local name being resolved.
+
+    Returns:
+        ``"def"``, ``"import"``, or ``""`` when the name is not bound here.
+    """
+    has_def = name in fd.module_level_functions
+    has_import = name in fd.import_bindings
+    if has_def and has_import:
+        return (
+            "def"
+            if fd.module_function_lines.get(name, -1)
+            > fd.module_import_lines.get(name, -1)
+            else "import"
+        )
+    if has_def:
+        return "def"
+    if has_import:
+        return "import"
+    return ""
+
+
+def _follow_name_binding(
+    fd: FileData,
+    binding: tuple[int, str, str],
+    by_path: dict[str, FileData],
+    module_map: dict[str, str],
+    reverse_map: dict[str, str],
+    seen: set[tuple[str, str]],
+) -> tuple[FileData, str, bool] | None:
+    """Resolve a name import binding, following re-exports.
+
+    Args:
+        fd: File that holds the binding.
+        binding: ``(level, module, function)`` for the imported name.
+        by_path: File path to file metadata.
+        module_map: File path to dotted module name.
+        reverse_map: Dotted module name to file path.
+        seen: ``(filepath, name)`` pairs already visited, for cycle protection.
+
+    Returns:
+        ``(defining file, function name, is_method)`` or None.
+    """
+    level, module, func = binding
+    if not func:
+        return None
+    path = _binding_file(fd, level, module, module_map, reverse_map)
+    target = by_path.get(path or "")
+    if target is None:
+        return None
+    return _resolve_name_in_file(
+        target, func, by_path, module_map, reverse_map, seen
+    )
+
+
+def _resolve_name_in_file(
+    fd: FileData,
+    name: str,
+    by_path: dict[str, FileData],
+    module_map: dict[str, str],
+    reverse_map: dict[str, str],
+    seen: set[tuple[str, str]],
+) -> tuple[FileData, str, bool] | None:
+    """Resolve a bare name to the function it finally refers to in *fd*.
+
+    Re-exported names (``from c import fetch`` in a module that only re-exports
+    it) are followed until a concrete definition is found.
+
+    Args:
+        fd: File in which the name is looked up.
+        name: Bare function name.
+        by_path: File path to file metadata.
+        module_map: File path to dotted module name.
+        reverse_map: Dotted module name to file path.
+        seen: ``(filepath, name)`` pairs already visited, for cycle protection.
+
+    Returns:
+        ``(defining file, function name, is_method)`` or None.
+    """
+    key = (fd.filepath, name)
+    if key in seen:
+        return None
+    seen.add(key)
+    kind = _module_name_binding(fd, name)
+    if kind == "def":
+        return fd, name, False
+    if kind == "import":
+        return _follow_name_binding(
+            fd, fd.import_bindings[name], by_path, module_map, reverse_map, seen
+        )
+    return None
+
+
 def _resolve_call_target(
     caller: FileData,
     kind: str,
@@ -5486,25 +5693,25 @@ def _resolve_call_target(
         return None
 
     # A ``name`` call. A function- or method-local import shadows every other
-    # binding in that scope; at module scope a definition that replaces an
-    # earlier import wins over the stale import binding.
+    # binding in that scope. At module scope the binding that runs last wins,
+    # and re-exported names are followed to their definition.
     local = scoped.get(name)
     if local is not None and local[2]:
-        level, module, func = local
-        path = _binding_file(caller, level, module, module_map, reverse_map)
-        target = by_path.get(path or "")
-        if target is not None and func in target.module_level_functions:
-            return target, func, False
-        return None
-    if name in caller.module_level_functions:
+        return _follow_name_binding(
+            caller, local, by_path, module_map, reverse_map, {(caller.filepath, name)}
+        )
+    kind = _module_name_binding(caller, name)
+    if kind == "def":
         return caller, name, False
-    binding = caller.import_bindings.get(name)
-    if binding is not None and binding[2]:
-        level, module, func = binding
-        path = _binding_file(caller, level, module, module_map, reverse_map)
-        target = by_path.get(path or "")
-        if target is not None and func in target.module_level_functions:
-            return target, func, False
+    if kind == "import":
+        return _follow_name_binding(
+            caller,
+            caller.import_bindings[name],
+            by_path,
+            module_map,
+            reverse_map,
+            {(caller.filepath, name)},
+        )
     return None
 
 

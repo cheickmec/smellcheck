@@ -1247,3 +1247,56 @@ def test_relative_submodule_uses_exact_module_not_ancestor(tmp_path: Path) -> No
     messages = [f.message for f in findings if f.pattern == "SC703"]
     assert any("run -> fetch -> time.sleep" in message for message in messages)
 
+# ---------------------------------------------------------------------------
+# 20. Binding order, re-exports, and namespace packages
+# ---------------------------------------------------------------------------
+
+
+def test_import_after_definition_wins(tmp_path: Path) -> None:
+    """An import that replaces an earlier module def wins, so no false SC703."""
+    (tmp_path / "b.py").write_text("async def fetch():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "a.py").write_text(
+        "import time\n\n"
+        "def fetch():\n    time.sleep(1)\n\n"
+        "from b import fetch\n\n"
+        "async def run():\n    await fetch()\n",
+        encoding="utf-8",
+    )
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    indirect = [
+        f for f in findings if f.pattern == "SC703" and "Indirect blocking" in f.message
+    ]
+    assert indirect == []
+
+
+def test_re_exported_callable_is_followed(tmp_path: Path) -> None:
+    """``a`` imports ``fetch`` that ``b`` re-exports from ``c`` -> SC703."""
+    (tmp_path / "a.py").write_text(
+        "import asyncio\nfrom b import fetch\n\nasync def run():\n    await fetch()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "b.py").write_text("from c import fetch\n", encoding="utf-8")
+    (tmp_path / "c.py").write_text(
+        "import time\n\ndef fetch():\n    time.sleep(1)\n", encoding="utf-8"
+    )
+    findings = scan_paths(
+        [tmp_path / "a.py", tmp_path / "b.py", tmp_path / "c.py"], use_cache=False
+    )
+    messages = [f.message for f in findings if f.pattern == "SC703"]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
+
+def test_namespace_package_identity_is_stable(tmp_path: Path) -> None:
+    """A namespace package keeps ``pkg.*`` names next to an unrelated dir."""
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "a.py").write_text("import pkg.b\n", encoding="utf-8")
+    (tmp_path / "src" / "pkg" / "b.py").write_text("import pkg.a\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text(
+        "def t():\n    return 1\n", encoding="utf-8"
+    )
+    findings = _sc503([tmp_path / "src", tmp_path / "tests"])
+    assert len(findings) == 1
+    assert "pkg.a" in findings[0].message
+    assert "pkg.b" in findings[0].message
+
