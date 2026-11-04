@@ -2352,26 +2352,41 @@ def _normalize_ast(node: ast.AST) -> str:
     return "|".join(parts)
 
 
-def _iter_module_imports(node: ast.AST) -> Iterator[ast.Import | ast.ImportFrom]:
+def _iter_module_imports(
+    node: ast.AST, *, include_class_bodies: bool = True
+) -> Iterator[ast.Import | ast.ImportFrom]:
     """Yield import statements that run at module import time.
 
     Imports nested inside function or lambda bodies are skipped because they
     run only when the callable is invoked. Class bodies execute during import,
-    so their imports count. Imports inside ``if`` and ``try`` also count.
+    so their imports count when *include_class_bodies* is true. Imports inside
+    ``if`` and ``try`` also count.
 
     Args:
         node: AST node to walk.
+        include_class_bodies: When True, descend into class bodies (eager
+            execution). When False, treat class bodies as nested scopes so
+            only true module-scope imports are returned.
 
     Yields:
         ``Import`` and ``ImportFrom`` nodes.
     """
+    skip: tuple[type[ast.AST], ...] = (
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+        ast.Lambda,
+    )
+    if not include_class_bodies:
+        skip = (*skip, ast.ClassDef)
     for child in ast.iter_child_nodes(node):
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        if isinstance(child, skip):
             continue
         if isinstance(child, (ast.Import, ast.ImportFrom)):
             yield child
         else:
-            yield from _iter_module_imports(child)
+            yield from _iter_module_imports(
+                child, include_class_bodies=include_class_bodies
+            )
 
 
 def _coerce_imports(raw: object) -> list[tuple[int, str, tuple[str, ...]]]:
@@ -2452,10 +2467,12 @@ def _remember_import_binding(
 
 
 def _extract_import_bindings(tree: ast.Module) -> dict[str, tuple[int, str, str]]:
-    """Map local names to the module and function they refer to.
+    """Map module-scope local names to the module and function they refer to.
 
-    Module-level imports override function-local imports of the same name.
-    An empty function name means the local name refers to a module.
+    Only imports that run at module import time are collected. Function-local
+    imports live in the per-scope maps (:func:`_extract_scoped_import_bindings`)
+    so an import inside one function cannot change resolution in another. An
+    empty function name means the local name refers to a module.
 
     Args:
         tree: Parsed module.
@@ -2464,10 +2481,7 @@ def _extract_import_bindings(tree: ast.Module) -> dict[str, tuple[int, str, str]
         ``local name -> (level, module, function)``.
     """
     bindings: dict[str, tuple[int, str, str]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            _remember_import_binding(bindings, node)
-    for node in _iter_module_imports(tree):
+    for node in _iter_module_imports(tree, include_class_bodies=False):
         _remember_import_binding(bindings, node)
     return bindings
 
@@ -5335,8 +5349,10 @@ def _binding_module_name(
         # ``from . import name`` names a member of the exact relative package.
         # ``_resolve_imported_modules`` would also add ancestor-loading edges,
         # making the single target ambiguous, so resolve the package directly.
+        # The package initializer itself need not be in the scan; the caller
+        # only requires the final submodule target to be present.
         relative = _relative_package(src, is_package, level)
-        if relative and relative in reverse_map:
+        if relative:
             return relative
         return None
     targets = _resolve_imported_modules(
