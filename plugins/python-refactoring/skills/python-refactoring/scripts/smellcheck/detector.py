@@ -2486,14 +2486,38 @@ def _extract_import_bindings(tree: ast.Module) -> dict[str, tuple[int, str, str]
     return bindings
 
 
+def _iter_scoped_functions(node: ast.AST) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Yield functions and methods that are not nested inside another function.
+
+    These are the callables whose calls are recorded under a ``stem:name`` key
+    by the detector: module-level functions (including ones guarded by ``if``
+    or ``try``) and class methods. Nested functions are skipped because their
+    calls are not attributed to a scope of their own.
+
+    Args:
+        node: AST node to walk.
+
+    Yields:
+        Function and method definition nodes.
+    """
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield child
+        elif isinstance(child, ast.Lambda):
+            continue
+        else:
+            yield from _iter_scoped_functions(child)
+
+
 def _extract_scoped_import_bindings(
     tree: ast.Module, stem: str
 ) -> dict[str, dict[str, tuple[int, str, str]]]:
-    """Collect import bindings per top-level callable scope.
+    """Collect import bindings per callable scope.
 
-    Function-local imports must resolve before module-level ones, and imports
-    in one function must not leak into another. The scope key matches the
-    ``stem:function`` key used by the call-site maps.
+    Function- and method-local imports must resolve before module-level ones,
+    and imports in one callable must not leak into another. The scope key
+    matches the ``stem:function`` key used by the call-site maps, so class
+    methods are collected alongside module-level functions.
 
     Args:
         tree: Parsed module.
@@ -2503,9 +2527,7 @@ def _extract_scoped_import_bindings(
         ``scope key -> {local name -> (level, module, function)}``.
     """
     scoped: dict[str, dict[str, tuple[int, str, str]]] = {}
-    for node in tree.body:
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
+    for node in _iter_scoped_functions(tree):
         bindings: dict[str, tuple[int, str, str]] = {}
         for child in _walk_skip_nested_scopes(node):
             if isinstance(child, (ast.Import, ast.ImportFrom)):
@@ -5366,7 +5388,9 @@ def _binding_module_name(
         return max(specific, key=len)
     if len(targets) == 1:
         return next(iter(targets))
-    if level == 0 and module and module in reverse_map:
+    if level == 0 and module:
+        # An absolute base module need not be in the scan; the caller appends
+        # the member and only requires the final target to be present.
         return module
     return None
 

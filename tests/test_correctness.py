@@ -1161,3 +1161,46 @@ def test_relative_submodule_resolves_without_scanned_initializer(
     messages = [f.message for f in findings if f.pattern == "SC703"]
     assert any("run -> fetch -> time.sleep" in message for message in messages)
 
+# ---------------------------------------------------------------------------
+# 18. Method-local bindings and absolute submodule resolution
+# ---------------------------------------------------------------------------
+
+
+def test_method_local_import_is_scoped(tmp_path: Path) -> None:
+    """An import inside an async method must not fall back to a module def."""
+    (tmp_path / "b.py").write_text("async def fetch():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "a.py").write_text(
+        "import time\n\n"
+        "def fetch():\n    time.sleep(1)\n\n"
+        "class A:\n"
+        "    async def run(self):\n"
+        "        from b import fetch\n"
+        "        await fetch()\n",
+        encoding="utf-8",
+    )
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    indirect = [
+        f for f in findings if f.pattern == "SC703" and "Indirect blocking" in f.message
+    ]
+    assert indirect == []
+
+
+def test_absolute_submodule_resolves_without_scanned_initializer(
+    tmp_path: Path,
+) -> None:
+    """``from pkg import b`` resolves even when ``pkg/__init__.py`` is not scanned."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "b.py").write_text(
+        "import time\n\ndef fetch():\n    time.sleep(1)\n", encoding="utf-8"
+    )
+    (pkg / "a.py").write_text(
+        "import asyncio\nfrom pkg import b\n\nasync def run():\n    b.fetch()\n",
+        encoding="utf-8",
+    )
+    # An explicit file list omits the package initializer.
+    findings = scan_paths([pkg / "a.py", pkg / "b.py"], use_cache=False)
+    messages = [f.message for f in findings if f.pattern == "SC703"]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
