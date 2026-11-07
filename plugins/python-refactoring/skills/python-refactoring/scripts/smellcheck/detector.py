@@ -2211,6 +2211,9 @@ def _names_used_in_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set
         Names that count as uses of this function's own scope.
     """
     used: set[str] = set()
+    # Comprehensions in a class body close over the enclosing function, not
+    # the class namespace. None means "use the shadowed set of this walk".
+    class_comp_scope: list[set[str] | None] = [None]
 
     def walk(current: ast.AST, shadowed: set[str]) -> None:
         if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
@@ -2236,28 +2239,38 @@ def _names_used_in_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set
             for keyword in current.keywords:
                 walk(keyword.value, shadowed)
             class_locals: set[str] = set()
+            saved_comp = class_comp_scope[0]
+            if saved_comp is None:
+                class_comp_scope[0] = shadowed
             for stmt in current.body:
                 bound = _stmt_bound_names(stmt)
                 if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     # Defaults and decorators see class bindings. The method
-                    # body closes over the enclosing function instead.
+                    # body and its comprehensions close over the function.
                     _note_signature_uses(stmt, shadowed | class_locals, walk)
                     inner = (
                         shadowed
                         | _names_bound_here(stmt)
                         | _globals_declared_here(stmt)
                     )
+                    method_comp = class_comp_scope[0]
+                    class_comp_scope[0] = None
                     for body_stmt in stmt.body:
                         walk(body_stmt, inner)
+                    class_comp_scope[0] = method_comp
                 else:
                     walk(stmt, shadowed | class_locals | bound)
                 class_locals.update(bound)
+            class_comp_scope[0] = saved_comp
             return
-        if isinstance(current, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-            _walk_comprehension(current.generators, [current.elt], shadowed, walk)
-            return
-        if isinstance(current, ast.DictComp):
-            _walk_comprehension(current.generators, [current.key, current.value], shadowed, walk)
+        if isinstance(current, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            scope = class_comp_scope[0] if class_comp_scope[0] is not None else shadowed
+            elts = (
+                [current.key, current.value]
+                if isinstance(current, ast.DictComp)
+                else [current.elt]
+            )
+            _walk_comprehension(current.generators, elts, scope, walk)
             return
         if isinstance(current, ast.ExceptHandler):
             if current.type is not None:

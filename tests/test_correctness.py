@@ -2018,3 +2018,20 @@ def test_package_class_shadows_same_named_submodule(tmp_path: Path) -> None:
         if finding.pattern == "SC703" and "Indirect blocking" in finding.message
     ]
     assert indirect == []
+
+
+def test_class_comprehension_uses_enclosing_parameter(tmp_path: Path) -> None:
+    """A comprehension in a class body closes over the function, not the class."""
+    path = _write_py(
+        tmp_path,
+        """\
+        def outer(value):
+            def inner():
+                class C:
+                    value = 1
+                    xs = [value for _ in range(1)]
+                return C
+            return inner
+        """,
+    )
+    assert _patterns(scan_path(path), "SC208") == []
