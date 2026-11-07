@@ -1553,3 +1553,72 @@ def test_match_without_capture_still_uses_outer_parameter(tmp_path: Path) -> Non
         """,
     )
     assert _patterns(scan_path(path), "SC208") == []
+
+
+def test_imported_class_method_is_indirect_blocking(tmp_path: Path) -> None:
+    """``from b import Helper`` then ``Helper.fetch()`` traces the static method."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        class Helper:
+            @staticmethod
+            def fetch():
+                time.sleep(1)
+        """,
+        name="b.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        from b import Helper
+        from b import Helper as Box
+
+        async def run():
+            Helper.fetch()
+
+        async def run_alias():
+            Box.fetch()
+        """,
+        name="a.py",
+    )
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    messages = [
+        finding.message
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+    assert any("run_alias -> fetch -> time.sleep" in message for message in messages)
+
+
+def test_parameter_shadows_imported_alias(tmp_path: Path) -> None:
+    """A parameter named ``helper`` is not the imported ``b.fetch``."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        def fetch():
+            time.sleep(1)
+        """,
+        name="b.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        from b import fetch as helper
+
+        async def run(helper):
+            await helper()
+        """,
+        name="a.py",
+    )
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    indirect = [
+        finding
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert indirect == []

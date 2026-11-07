@@ -1093,7 +1093,7 @@ def _resolve_extends(
 # ---------------------------------------------------------------------------
 
 _DEFAULT_CACHE_DIR: Final = ".smellcheck-cache"
-_CACHE_VERSION: Final = 8
+_CACHE_VERSION: Final = 9
 
 
 def _cache_file_id(path: Path) -> str:
@@ -1268,6 +1268,9 @@ def _serialize_file_data(fd: FileData) -> dict:
             }
             for scope, bindings in fd.scoped_import_bindings.items()
         },
+        "scope_local_names": {
+            scope: sorted(names) for scope, names in fd.scope_local_names.items()
+        },
         "module_import_lines": fd.module_import_lines,
         "module_function_lines": fd.module_function_lines,
         "function_call_sites": {
@@ -1381,6 +1384,11 @@ def _deserialize_file_data(d: dict) -> FileData:
         scoped_import_bindings=_coerce_scoped_import_bindings(
             d.get("scoped_import_bindings", {})
         ),
+        scope_local_names={
+            str(scope): {str(name) for name in names}
+            for scope, names in d.get("scope_local_names", {}).items()
+            if isinstance(names, list)
+        },
         module_import_lines={
             str(k): int(v) for k, v in d.get("module_import_lines", {}).items()
         },
@@ -2761,6 +2769,9 @@ class FileData:
     scoped_import_bindings: dict[str, dict[str, tuple[int, str, str]]] = field(
         default_factory=dict
     )
+    # "stem:function" -> names bound in that function (parameters, assignments,
+    # nested defs). Those names shadow module-level imports.
+    scope_local_names: dict[str, set[str]] = field(default_factory=dict)
     # name -> line of the last module-scope import binding for that name
     module_import_lines: dict[str, int] = field(default_factory=dict)
     # name -> line of a module-level function definition
@@ -3991,6 +4002,7 @@ class SmellDetector(ast.NodeVisitor):
         self.file_data.function_calls_map[qname] = callees
         self.file_data.function_call_lines_map[qname] = call_lines
         self.file_data.function_call_sites[qname] = sites
+        self.file_data.scope_local_names[qname] = _names_bound_here(node)
         if blocking:
             self.file_data.blocking_calls_in_functions[qname] = blocking
 
@@ -5835,6 +5847,68 @@ def _resolve_name_in_file(
     return None
 
 
+def _name_shadowed_in_scope(caller: FileData, scope_key: str, name: str) -> bool:
+    """Return whether *name* is a local of the calling function.
+
+    A parameter, assignment, or nested definition hides a module-level import
+    of the same name. A function-local import is not a shadow; it is the
+    binding that should be followed.
+
+    Args:
+        caller: File containing the call.
+        scope_key: ``stem:function`` key of the caller. Empty when unknown.
+        name: Bare name used as a callee or attribute receiver.
+
+    Returns:
+        True when module-level bindings must not be used for *name*.
+    """
+    if not scope_key or not name:
+        return False
+    if name in caller.scoped_import_bindings.get(scope_key, {}):
+        return False
+    return name in caller.scope_local_names.get(scope_key, set())
+
+
+def _imported_class_method(
+    caller: FileData,
+    receiver: str,
+    method: str,
+    scoped: dict[str, tuple[int, str, str]],
+    by_path: dict[str, FileData],
+    module_map: dict[str, str],
+    reverse_map: dict[str, str],
+) -> tuple[FileData, str, bool] | None:
+    """Resolve ``Helper.fetch`` when ``Helper`` is an imported class.
+
+    Args:
+        caller: File containing the call.
+        receiver: Bare class name used at the call.
+        method: Attribute being called.
+        scoped: Function-local import bindings.
+        by_path: File path to file metadata.
+        module_map: File path to dotted module name.
+        reverse_map: Dotted module name to file path.
+
+    Returns:
+        ``(class file, method name, is_method)`` or None.
+    """
+    if "." in receiver:
+        return None
+    binding = scoped.get(receiver) or caller.import_bindings.get(receiver)
+    if binding is None or not binding[2]:
+        return None
+    level, module, class_name = binding
+    path = _binding_file(caller, level, module, module_map, reverse_map)
+    target = by_path.get(path or "")
+    if target is None:
+        return None
+    if not _class_binding_wins(target, class_name):
+        return None
+    if not _class_defines_method(target, class_name, method):
+        return None
+    return target, method, True
+
+
 def _class_binding_wins(fd: FileData, name: str) -> bool:
     """Return whether a class statement is the binding of *name*.
 
@@ -5906,6 +5980,9 @@ def _resolve_call_target(
         return None
 
     if kind == "attr":
+        receiver_root = receiver.split(".", 1)[0]
+        if _name_shadowed_in_scope(caller, scope_key, receiver_root):
+            return None
         if (
             "." not in receiver
             and receiver not in scoped
@@ -5918,10 +5995,12 @@ def _resolve_call_target(
             caller, receiver, module_map, reverse_map, scoped, by_path
         )
         target = by_path.get(path or "")
-        if target is None:
-            return None
-        return _resolve_name_in_file(
-            target, name, by_path, module_map, reverse_map, set()
+        if target is not None:
+            return _resolve_name_in_file(
+                target, name, by_path, module_map, reverse_map, set()
+            )
+        return _imported_class_method(
+            caller, receiver, name, scoped, by_path, module_map, reverse_map
         )
 
     # A ``name`` call. A function- or method-local import shadows every other
@@ -5932,6 +6011,8 @@ def _resolve_call_target(
         return _follow_name_binding(
             caller, local, by_path, module_map, reverse_map, {(caller.filepath, name)}
         )
+    if _name_shadowed_in_scope(caller, scope_key, name):
+        return None
     kind = _module_name_binding(caller, name)
     if kind == "def":
         return caller, name, False
