@@ -2010,7 +2010,8 @@ def _names_bound_here(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
 
     ``nonlocal`` and ``global`` names are not local bindings, so a nested
     function can still capture them. A nested ``def``/``class`` binds its own
-    name here, so it shadows an enclosing name of the same spelling.
+    name here, so it shadows an enclosing name of the same spelling. Match
+    captures (``case value``, ``*rest``, ``**rest``) are locals too.
 
     Args:
         node: Function or lambda scope.
@@ -2038,6 +2039,12 @@ def _names_bound_here(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda)
                 if alias.name == "*":
                     continue
                 bound.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(current, ast.MatchAs) and isinstance(current.name, str):
+            bound.add(current.name)
+        elif isinstance(current, ast.MatchStar) and isinstance(current.name, str):
+            bound.add(current.name)
+        elif isinstance(current, ast.MatchMapping) and isinstance(current.rest, str):
+            bound.add(current.rest)
 
     _stop_at_nested(node, visit)
     return bound - skipped
@@ -5618,18 +5625,69 @@ def _binding_file(
     return reverse_map.get(name) if name else None
 
 
+def _imported_module_file(
+    fd: FileData,
+    binding: tuple[int, str, str],
+    by_path: dict[str, FileData],
+    module_map: dict[str, str],
+    reverse_map: dict[str, str],
+    seen: set[tuple[str, str]],
+) -> str | None:
+    """Return the scanned file a binding refers to when that value is a module.
+
+    ``from . import b as helper`` binds ``helper`` to ``pkg.b``. Callers that
+    only join the local name (``pkg.helper``) miss that file.
+
+    Args:
+        fd: File that holds the binding.
+        binding: ``(level, module, imported name)``.
+        by_path: File path to file metadata.
+        module_map: File path to dotted module name.
+        reverse_map: Dotted module name to file path.
+        seen: ``(filepath, name)`` pairs already followed, for cycle protection.
+
+    Returns:
+        File path of the module, or None when the binding is not a module.
+    """
+    level, module, func = binding
+    marker = (fd.filepath, func or module)
+    if marker in seen:
+        return None
+    seen.add(marker)
+    base = _binding_module_name(fd, level, module, module_map)
+    if not func:
+        return reverse_map.get(base) if base else None
+    candidate = f"{base}.{func}" if base else func
+    direct = reverse_map.get(candidate)
+    if direct is not None:
+        return direct
+    package = by_path.get(reverse_map.get(base or "", ""))
+    if package is None or _module_name_binding(package, func) != "import":
+        return None
+    return _imported_module_file(
+        package,
+        package.import_bindings[func],
+        by_path,
+        module_map,
+        reverse_map,
+        seen,
+    )
+
+
 def _resolve_attr_module(
     caller: FileData,
     receiver: str,
     module_map: dict[str, str],
     reverse_map: dict[str, str],
     scoped: dict[str, tuple[int, str, str]],
+    by_path: dict[str, FileData] | None = None,
 ) -> str | None:
     """Resolve a dotted attribute receiver to a scanned module file path.
 
     Handles ``import pkg.helpers`` (``pkg.helpers.fetch()``), ``from pkg
     import helpers`` (``helpers.fetch()``) and aliases, including a member
-    that names a submodule rather than a function.
+    that names a submodule rather than a function. A package re-export such
+    as ``from . import b as helper`` is followed to ``pkg.b``.
 
     Args:
         caller: File containing the attribute call.
@@ -5637,6 +5695,8 @@ def _resolve_attr_module(
         module_map: File path to dotted module name.
         reverse_map: Dotted module name to file path.
         scoped: Function-local import bindings for the calling scope.
+        by_path: File path to metadata. Used to follow module re-exports.
+            None keeps the direct name lookup only.
 
     Returns:
         File path of the module the receiver refers to, or None.
@@ -5656,7 +5716,22 @@ def _resolve_attr_module(
         dotted = f"{dotted}.{func}" if dotted else func
     for part in tail:
         dotted = f"{dotted}.{part}" if dotted else part
-    return reverse_map.get(dotted)
+    found = reverse_map.get(dotted)
+    if found is not None or by_path is None:
+        return found
+    followed = _imported_module_file(
+        caller, binding, by_path, module_map, reverse_map, set()
+    )
+    if followed is None:
+        return None
+    path = followed
+    for part in tail:
+        mod_name = module_map.get(path, "")
+        nxt = reverse_map.get(f"{mod_name}.{part}") if mod_name else None
+        if nxt is None:
+            return None
+        path = nxt
+    return path
 
 
 def _module_name_binding(fd: FileData, name: str) -> str:
@@ -5760,6 +5835,42 @@ def _resolve_name_in_file(
     return None
 
 
+def _class_binding_wins(fd: FileData, name: str) -> bool:
+    """Return whether a class statement is the binding of *name*.
+
+    A later import replaces the class. An earlier import does not.
+
+    Args:
+        fd: File that may define the class.
+        name: Receiver name, such as ``Helper`` in ``Helper.fetch()``.
+
+    Returns:
+        True when *name* refers to a class defined in *fd*.
+    """
+    if name not in fd.class_names:
+        return False
+    if name not in fd.import_bindings:
+        return True
+    return fd.class_lines.get(name, -1) > fd.module_import_lines.get(name, -1)
+
+
+def _class_defines_method(fd: FileData, class_name: str, method: str) -> bool:
+    """Return whether *class_name* in *fd* defines *method*.
+
+    Args:
+        fd: File containing the class.
+        class_name: Class whose body is inspected.
+        method: Method name used as an attribute.
+
+    Returns:
+        True when that class body contains the method.
+    """
+    return any(
+        info.name == class_name and method in info.methods_using_fields
+        for info in fd.class_info
+    )
+
+
 def _resolve_call_target(
     caller: FileData,
     kind: str,
@@ -5795,7 +5906,17 @@ def _resolve_call_target(
         return None
 
     if kind == "attr":
-        path = _resolve_attr_module(caller, receiver, module_map, reverse_map, scoped)
+        if (
+            "." not in receiver
+            and receiver not in scoped
+            and _class_binding_wins(caller, receiver)
+        ):
+            if _class_defines_method(caller, receiver, name):
+                return caller, name, True
+            return None
+        path = _resolve_attr_module(
+            caller, receiver, module_map, reverse_map, scoped, by_path
+        )
         target = by_path.get(path or "")
         if target is None:
             return None

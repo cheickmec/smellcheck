@@ -1418,3 +1418,138 @@ def test_changed_files_keep_the_loaded_config_root(tmp_path: Path) -> None:
     changed_names = sorted(Path(item["file"]).name for item in json.loads(changed.stdout))
     full_names = sorted(Path(item["file"]).name for item in json.loads(full.stdout))
     assert changed_names == full_names == ["test_x.py"]
+
+
+# ---------------------------------------------------------------------------
+# 24. Class calls, module re-exports, and match captures
+# ---------------------------------------------------------------------------
+
+
+def test_class_qualified_static_method_is_indirect_blocking(tmp_path: Path) -> None:
+    """``Helper.fetch()`` traces a local class's synchronous static method."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        class Helper:
+            @staticmethod
+            def fetch():
+                time.sleep(1)
+
+        async def run():
+            Helper.fetch()
+        """,
+        name="a.py",
+    )
+    _write_py(tmp_path, "x = 1\n", name="b.py")
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    messages = [
+        finding.message
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
+
+def test_class_without_method_does_not_use_module_function(tmp_path: Path) -> None:
+    """``Helper.fetch()`` is not the module-level ``fetch`` when Helper has no such method."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        def fetch():
+            time.sleep(1)
+
+        class Helper:
+            pass
+
+        async def run():
+            Helper.fetch()
+        """,
+        name="a.py",
+    )
+    _write_py(tmp_path, "x = 1\n", name="b.py")
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    indirect = [
+        finding
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert indirect == []
+
+
+def test_reexported_module_alias_is_indirect_blocking(tmp_path: Path) -> None:
+    """``from . import b as helper`` makes ``helper.fetch()`` resolve to ``pkg.b``."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("from . import b as helper\n", encoding="utf-8")
+    (pkg / "b.py").write_text(
+        "import time\n\ndef fetch():\n    time.sleep(1)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app.py").write_text(
+        "from pkg import helper\n\nasync def run():\n    helper.fetch()\n",
+        encoding="utf-8",
+    )
+    findings = scan_paths([pkg, tmp_path / "app.py"], use_cache=False)
+    messages = [
+        finding.message
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
+
+def test_match_capture_shadows_outer_parameter(tmp_path: Path) -> None:
+    """A match capture is a local binding, so it does not use the outer parameter."""
+    path = _write_py(
+        tmp_path,
+        """\
+        def make(value):
+            def inner(subject):
+                match subject:
+                    case {"x": value}:
+                        return value
+                return 0
+            return inner
+
+        def starred(value):
+            def inner(subject):
+                match subject:
+                    case [*value]:
+                        return value
+                return 0
+            return inner
+
+        def mapped(value):
+            def inner(subject):
+                match subject:
+                    case {**value}:
+                        return value
+                return 0
+            return inner
+        """,
+    )
+    findings = _patterns(scan_path(path), "SC208")
+    names = sorted(finding.message for finding in findings)
+    assert len(findings) == 3
+    assert all("value" in message for message in names)
+
+
+def test_match_without_capture_still_uses_outer_parameter(tmp_path: Path) -> None:
+    """A match that binds a different name still captures the outer parameter."""
+    path = _write_py(
+        tmp_path,
+        """\
+        def make(value):
+            def inner(subject):
+                match subject:
+                    case {"x": other}:
+                        return value + other
+                return value
+            return inner
+        """,
+    )
+    assert _patterns(scan_path(path), "SC208") == []
