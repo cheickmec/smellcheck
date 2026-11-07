@@ -5909,6 +5909,47 @@ def _imported_class_method(
     return target, method, True
 
 
+def _qualified_class_method(
+    caller: FileData,
+    receiver: str,
+    method: str,
+    scoped: dict[str, tuple[int, str, str]],
+    by_path: dict[str, FileData],
+    module_map: dict[str, str],
+    reverse_map: dict[str, str],
+) -> tuple[FileData, str, bool] | None:
+    """Resolve ``b.Helper.fetch`` to a method of a class in module ``b``.
+
+    Args:
+        caller: File containing the call.
+        receiver: Dotted receiver, including the class name.
+        method: Attribute being called.
+        scoped: Function-local import bindings.
+        by_path: File path to file metadata.
+        module_map: File path to dotted module name.
+        reverse_map: Dotted module name to file path.
+
+    Returns:
+        ``(class file, method name, is_method)`` or None.
+    """
+    parts = [part for part in receiver.split(".") if part]
+    if len(parts) < 2:
+        return None
+    module_receiver = ".".join(parts[:-1])
+    class_name = parts[-1]
+    path = _resolve_attr_module(
+        caller, module_receiver, module_map, reverse_map, scoped, by_path
+    )
+    target = by_path.get(path or "")
+    if target is None:
+        return None
+    if not _class_binding_wins(target, class_name):
+        return None
+    if not _class_defines_method(target, class_name, method):
+        return None
+    return target, method, True
+
+
 def _class_binding_wins(fd: FileData, name: str) -> bool:
     """Return whether a class statement is the binding of *name*.
 
@@ -5999,7 +6040,12 @@ def _resolve_call_target(
             return _resolve_name_in_file(
                 target, name, by_path, module_map, reverse_map, set()
             )
-        return _imported_class_method(
+        imported = _imported_class_method(
+            caller, receiver, name, scoped, by_path, module_map, reverse_map
+        )
+        if imported is not None:
+            return imported
+        return _qualified_class_method(
             caller, receiver, name, scoped, by_path, module_map, reverse_map
         )
 

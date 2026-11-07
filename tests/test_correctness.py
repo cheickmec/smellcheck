@@ -1622,3 +1622,36 @@ def test_parameter_shadows_imported_alias(tmp_path: Path) -> None:
         if finding.pattern == "SC703" and "Indirect blocking" in finding.message
     ]
     assert indirect == []
+
+
+def test_module_qualified_class_method_is_indirect_blocking(tmp_path: Path) -> None:
+    """``import b`` then ``b.Helper.fetch()`` traces the class method in ``b``."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        class Helper:
+            @staticmethod
+            def fetch():
+                time.sleep(1)
+        """,
+        name="b.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        import b
+
+        async def run():
+            b.Helper.fetch()
+        """,
+        name="a.py",
+    )
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    messages = [
+        finding.message
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
