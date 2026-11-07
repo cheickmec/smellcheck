@@ -2259,12 +2259,16 @@ def _names_used_in_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set
         if isinstance(current, ast.DictComp):
             _walk_comprehension(current.generators, [current.key, current.value], shadowed, walk)
             return
+        if isinstance(current, ast.ExceptHandler):
+            if current.type is not None:
+                walk(current.type, shadowed)
+            bound = {current.name} if isinstance(current.name, str) else set()
+            for stmt in current.body:
+                walk(stmt, shadowed | bound)
+            return
         if isinstance(current, ast.Name) and current.id not in shadowed:
             used.add(current.id)
             return
-        if isinstance(current, ast.ExceptHandler) and isinstance(current.name, str):
-            if current.name not in shadowed:
-                used.add(current.name)
         for child in ast.iter_child_nodes(current):
             walk(child, shadowed)
 
@@ -5908,6 +5912,10 @@ def _extract_module_rebindings(tree: ast.Module) -> dict[str, tuple[int, str]]:
                 for target in child.targets:
                     for name in _binding_targets(target):
                         found[name] = (child.lineno, rhs)
+            elif isinstance(child, ast.AnnAssign) and child.value is not None:
+                rhs = child.value.id if isinstance(child.value, ast.Name) else ""
+                for name in _binding_targets(child.target):
+                    found[name] = (child.lineno, rhs)
             walk(child)
 
     walk(tree)
@@ -6068,10 +6076,12 @@ def _imported_class_method(
         return None
     if not _class_binding_wins(target, class_name):
         return None
-    scope = _defining_method_scope(target, class_name, method)
-    if not scope:
+    found = _defining_method(
+        target, class_name, method, by_path, module_map, reverse_map
+    )
+    if found is None:
         return None
-    return target, scope, True
+    return found[0], found[1], True
 
 
 def _qualified_class_method(
@@ -6110,10 +6120,12 @@ def _qualified_class_method(
         return None
     if not _class_binding_wins(target, class_name):
         return None
-    scope = _defining_method_scope(target, class_name, method)
-    if not scope:
+    found = _defining_method(
+        target, class_name, method, by_path, module_map, reverse_map
+    )
+    if found is None:
         return None
-    return target, scope, True
+    return found[0], found[1], True
 
 
 def _class_of_scope(scope_key: str) -> str:
@@ -6132,34 +6144,70 @@ def _class_of_scope(scope_key: str) -> str:
 
 
 
-def _defining_method_scope(fd: FileData, class_name: str, method: str) -> str:
-    """Return the ``Class.method`` key for the class that defines *method*.
+def _defining_method(
+    fd: FileData,
+    class_name: str,
+    method: str,
+    by_path: dict[str, FileData],
+    module_map: dict[str, str],
+    reverse_map: dict[str, str],
+) -> tuple[FileData, str] | None:
+    """Find the class body that defines *method*, following bases.
+
+    Every base is searched, not only the first. A base imported from another
+    scanned file is followed. The returned scope key is the defining class.
 
     Args:
-        fd: File containing the class hierarchy.
-        class_name: Class used at the call, which may inherit the method.
+        fd: File in which *class_name* is defined or imported.
+        class_name: Class used at the call.
         method: Method name.
+        by_path: File path to file metadata.
+        module_map: File path to dotted module name.
+        reverse_map: Dotted module name to file path.
 
     Returns:
-        Scope suffix of the defining class, or empty when no class body in
-        this file defines *method*.
+        ``(defining file, Class.method)`` or None.
     """
-    seen: set[str] = set()
-    current = class_name
-    while current and current not in seen:
-        seen.add(current)
-        if _class_defines_method(fd, current, method):
-            return _scope_suffix(current, method)
-        bases = fd.class_bases.get(current, [])
-        current = next(
-            (
-                base
-                for base in bases
-                if base in fd.class_bases or base in fd.class_names
-            ),
-            "",
-        )
-    return ""
+    seen: set[tuple[str, str]] = set()
+
+    def home_for(owner: FileData, name: str) -> FileData | None:
+        if name in owner.class_bases or name in owner.class_names:
+            return owner
+        if _module_name_binding(owner, name) != "import":
+            return None
+        binding = owner.import_bindings.get(name)
+        if binding is None or not binding[2]:
+            return None
+        path = _binding_file(owner, binding[0], binding[1], module_map, reverse_map)
+        target = by_path.get(path or "")
+        if target is None:
+            return None
+        imported = binding[2]
+        if imported in target.class_bases or imported in target.class_names:
+            return target
+        return None
+
+    def search(owner: FileData, current: str) -> tuple[FileData, str] | None:
+        home = home_for(owner, current)
+        if home is None:
+            return None
+        defined_as = current
+        if current not in home.class_bases and current not in home.class_names:
+            binding = owner.import_bindings.get(current)
+            defined_as = binding[2] if binding and binding[2] else current
+        key = (home.filepath, defined_as)
+        if key in seen:
+            return None
+        seen.add(key)
+        if _class_defines_method(home, defined_as, method):
+            return home, _scope_suffix(defined_as, method)
+        for base in home.class_bases.get(defined_as, []):
+            found = search(home, base)
+            if found is not None:
+                return found
+        return None
+
+    return search(fd, class_name)
 
 
 def _class_binding_wins(fd: FileData, name: str) -> bool:
@@ -6230,9 +6278,11 @@ def _resolve_call_target(
     if kind == "attr" and receiver in ("self", "cls"):
         class_name = _class_of_scope(scope_key)
         if class_name:
-            scope = _defining_method_scope(caller, class_name, name)
-            if scope:
-                return caller, scope, True
+            found = _defining_method(
+                caller, class_name, name, by_path, module_map, reverse_map
+            )
+            if found is not None:
+                return found[0], found[1], True
             return None
         if name in caller.defined_functions:
             return caller, name, True
@@ -6247,9 +6297,11 @@ def _resolve_call_target(
             and receiver not in scoped
             and _class_binding_wins(caller, receiver)
         ):
-            scope = _defining_method_scope(caller, receiver, name)
-            if scope:
-                return caller, scope, True
+            found = _defining_method(
+                caller, receiver, name, by_path, module_map, reverse_map
+            )
+            if found is not None:
+                return found[0], found[1], True
             return None
         path = _resolve_attr_module(
             caller, receiver, module_map, reverse_map, scoped, by_path

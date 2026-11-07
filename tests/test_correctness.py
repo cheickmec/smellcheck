@@ -1841,3 +1841,118 @@ def test_method_default_sees_class_local_binding(tmp_path: Path) -> None:
     findings = _patterns(scan_path(path), "SC208")
     assert len(findings) == 1
     assert "value" in findings[0].message
+
+
+def test_later_base_method_is_indirect_blocking(tmp_path: Path) -> None:
+    """``Child(First, Second)`` finds ``fetch`` on the second base."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        class First:
+            pass
+
+        class Second:
+            def fetch(self):
+                time.sleep(1)
+
+        class Child(First, Second):
+            async def run(self):
+                self.fetch()
+        """,
+        name="a.py",
+    )
+    findings = scan_path(tmp_path / "a.py")
+    messages = [
+        finding.message
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
+
+def test_imported_base_method_is_indirect_blocking(tmp_path: Path) -> None:
+    """``class Child(Base)`` traces ``fetch`` defined on an imported base."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        class Base:
+            def fetch(self):
+                time.sleep(1)
+        """,
+        name="b.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        from b import Base
+
+        class Child(Base):
+            async def run(self):
+                self.fetch()
+        """,
+        name="a.py",
+    )
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    messages = [
+        finding.message
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
+
+def test_annotated_assignment_replaces_imported_callable(tmp_path: Path) -> None:
+    """``helper: object = nonblocking`` replaces the imported callable."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        def fetch():
+            time.sleep(1)
+        """,
+        name="b.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        from b import fetch as helper
+
+        async def nonblocking():
+            return 1
+
+        helper: object = nonblocking
+
+        async def run():
+            await helper()
+        """,
+        name="a.py",
+    )
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    indirect = [
+        finding
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert indirect == []
+
+
+def test_exception_target_is_not_a_parameter_use(tmp_path: Path) -> None:
+    """``except ValueError as value`` does not count as a use of parameter ``value``."""
+    path = _write_py(
+        tmp_path,
+        """\
+        def parse(value):
+            try:
+                pass
+            except ValueError as value:
+                pass
+        """,
+    )
+    findings = _patterns(scan_path(path), "SC208")
+    assert len(findings) == 1
+    assert "value" in findings[0].message
