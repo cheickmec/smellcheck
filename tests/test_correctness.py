@@ -1956,3 +1956,65 @@ def test_exception_target_is_not_a_parameter_use(tmp_path: Path) -> None:
     findings = _patterns(scan_path(path), "SC208")
     assert len(findings) == 1
     assert "value" in findings[0].message
+
+
+def test_diamond_mro_prefers_later_override(tmp_path: Path) -> None:
+    """C3 picks ``Right.fetch`` over the shared ``Root.fetch``."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        class Root:
+            def fetch(self):
+                return 1
+
+        class Left(Root):
+            pass
+
+        class Right(Root):
+            def fetch(self):
+                time.sleep(1)
+
+        class Child(Left, Right):
+            async def run(self):
+                self.fetch()
+        """,
+        name="a.py",
+    )
+    _write_py(tmp_path, "x = 1\n", name="b.py")
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    messages = [
+        finding.message
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
+
+def test_package_class_shadows_same_named_submodule(tmp_path: Path) -> None:
+    """``from pkg import Helper`` binds the class, not ``pkg/Helper.py``."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text(
+        "class Helper:\n"
+        "    @staticmethod\n"
+        "    async def fetch():\n"
+        "        return 1\n",
+        encoding="utf-8",
+    )
+    (pkg / "Helper.py").write_text(
+        "import time\n\ndef fetch():\n    time.sleep(1)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "app.py").write_text(
+        "from pkg import Helper\n\nasync def run():\n    await Helper.fetch()\n",
+        encoding="utf-8",
+    )
+    findings = scan_paths([pkg, tmp_path / "app.py"], use_cache=False)
+    indirect = [
+        finding
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert indirect == []

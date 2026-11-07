@@ -5866,10 +5866,17 @@ def _resolve_attr_module(
     dotted = _binding_module_name(caller, level, module, module_map)
     if dotted is None:
         return None
+    base_name = dotted
     if func:
         dotted = f"{dotted}.{func}" if dotted else func
     for part in tail:
         dotted = f"{dotted}.{part}" if dotted else part
+    if (
+        func
+        and by_path is not None
+        and _package_class_shadows_submodule(by_path, reverse_map, base_name, func)
+    ):
+        return None
     found = reverse_map.get(dotted)
     if found is not None or by_path is None:
         return found
@@ -6144,6 +6151,63 @@ def _class_of_scope(scope_key: str) -> str:
 
 
 
+
+def _package_class_shadows_submodule(
+    by_path: dict[str, FileData],
+    reverse_map: dict[str, str],
+    package_name: str,
+    member: str,
+) -> bool:
+    """Return whether a package class occupies *member* ahead of a submodule.
+
+    Args:
+        by_path: File path to file metadata.
+        reverse_map: Dotted module name to file path.
+        package_name: Dotted package that was imported from.
+        member: Imported name, which may also be a submodule.
+
+    Returns:
+        True when the package binds *member* to a class, so ``from pkg
+        import member`` does not load ``pkg.member``.
+    """
+    package = by_path.get(reverse_map.get(package_name, ""))
+    if package is None:
+        return False
+    return _class_binding_wins(package, member)
+
+
+def _c3_merge(sequences: list[list[tuple[str, str]]]) -> list[tuple[str, str]]:
+    """Merge C3 linearizations. An inconsistent hierarchy is linearized in order.
+
+    Args:
+        sequences: Base linearizations followed by the base list.
+
+    Returns:
+        Merged class identities ``(filepath, class name)``.
+    """
+    seqs = [list(seq) for seq in sequences if seq]
+    merged: list[tuple[str, str]] = []
+    while seqs:
+        choice: tuple[str, str] | None = None
+        for seq in seqs:
+            cand = seq[0]
+            if all(cand not in other[1:] for other in seqs):
+                choice = cand
+                break
+        if choice is None:
+            for seq in seqs:
+                for item in seq:
+                    if item not in merged:
+                        merged.append(item)
+            return merged
+        merged.append(choice)
+        for seq in seqs:
+            if seq and seq[0] == choice:
+                del seq[0]
+        seqs = [seq for seq in seqs if seq]
+    return merged
+
+
 def _defining_method(
     fd: FileData,
     class_name: str,
@@ -6154,8 +6218,8 @@ def _defining_method(
 ) -> tuple[FileData, str] | None:
     """Find the class body that defines *method*, following bases.
 
-    Every base is searched, not only the first. A base imported from another
-    scanned file is followed. The returned scope key is the defining class.
+    Bases are ordered with C3, so a later base that overrides a shared
+    ancestor wins. A base imported from another scanned file is followed.
 
     Args:
         fd: File in which *class_name* is defined or imported.
@@ -6168,11 +6232,9 @@ def _defining_method(
     Returns:
         ``(defining file, Class.method)`` or None.
     """
-    seen: set[tuple[str, str]] = set()
-
-    def home_for(owner: FileData, name: str) -> FileData | None:
+    def resolve(owner: FileData, name: str) -> tuple[str, str] | None:
         if name in owner.class_bases or name in owner.class_names:
-            return owner
+            return (owner.filepath, name)
         if _module_name_binding(owner, name) != "import":
             return None
         binding = owner.import_bindings.get(name)
@@ -6184,30 +6246,37 @@ def _defining_method(
             return None
         imported = binding[2]
         if imported in target.class_bases or imported in target.class_names:
-            return target
+            return (target.filepath, imported)
         return None
 
-    def search(owner: FileData, current: str) -> tuple[FileData, str] | None:
-        home = home_for(owner, current)
+    def linearize(
+        ident: tuple[str, str], stack: set[tuple[str, str]]
+    ) -> list[tuple[str, str]]:
+        if ident in stack:
+            return [ident]
+        nested = set(stack)
+        nested.add(ident)
+        path, name = ident
+        home = by_path.get(path)
         if home is None:
-            return None
-        defined_as = current
-        if current not in home.class_bases and current not in home.class_names:
-            binding = owner.import_bindings.get(current)
-            defined_as = binding[2] if binding and binding[2] else current
-        key = (home.filepath, defined_as)
-        if key in seen:
-            return None
-        seen.add(key)
-        if _class_defines_method(home, defined_as, method):
-            return home, _scope_suffix(defined_as, method)
-        for base in home.class_bases.get(defined_as, []):
-            found = search(home, base)
-            if found is not None:
-                return found
-        return None
+            return [ident]
+        bases = [
+            resolved
+            for base in home.class_bases.get(name, [])
+            if (resolved := resolve(home, base)) is not None
+        ]
+        seqs = [linearize(base, nested) for base in bases]
+        seqs.append(bases)
+        return [ident, *_c3_merge(seqs)]
 
-    return search(fd, class_name)
+    origin = resolve(fd, class_name)
+    if origin is None:
+        return None
+    for path, name in linearize(origin, set()):
+        home = by_path.get(path)
+        if home is not None and _class_defines_method(home, name, method):
+            return home, _scope_suffix(name, method)
+    return None
 
 
 def _class_binding_wins(fd: FileData, name: str) -> bool:
