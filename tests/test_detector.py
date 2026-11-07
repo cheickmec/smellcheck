@@ -2593,14 +2593,18 @@ def test_extends_list_non_string_entries(tmp_path, capsys):
 
 
 def test_extends_absent_no_change(tmp_path):
-    """No extends key preserves existing behavior exactly."""
+    """No extends key keeps the declared settings and records the config directory."""
     _write_toml(tmp_path / "pyproject.toml", """\
         [tool.smellcheck]
         ignore = ["SC601"]
         fail-on = "warning"
     """)
     config = load_config(tmp_path)
-    assert config == {"ignore": ["SC601"], "fail-on": "warning"}
+    assert config == {
+        "ignore": ["SC601"],
+        "fail-on": "warning",
+        "_config_root": str((tmp_path / "pyproject.toml").resolve().parent),
+    }
 
 
 def test_extends_e2e_scan(tmp_path):

@@ -68,7 +68,7 @@ When extending configs:
 |-----|----------|
 | `select` | Override (child replaces parent entirely) |
 | `ignore` | Union (deduplicated, base order preserved, new codes appended) |
-| `per-file-ignores` | Deep merge (same glob unions codes) |
+| `per-file-ignores` | Deep merge (same glob unions codes). Patterns are relative to the directory containing the config file that was loaded. `--diff` does not rebase them onto a nested config. |
 | `fail-on`, `format`, `baseline`, `cache`, `cache-dir` | Override (child wins) |
 | `extends` | Consumed and stripped |
 
@@ -124,10 +124,19 @@ x = input("name")  # noqa                (all rules)
 
 | Code | Meaning |
 |------|---------|
-| `0` | No findings at or above the `--fail-on` severity level |
-| `1` | At least one finding meets or exceeds the `--fail-on` severity, or an error occurred |
+| `0` | Every requested file was analyzed, and no finding meets `--fail-on` |
+| `1` | At least one finding meets or exceeds `--fail-on` |
+| `2` | One or more files could not be analyzed (syntax error, undecodable bytes, or permission error) |
 
-The default `--fail-on` is `error`, so smellcheck exits 0 unless an error-severity finding is detected.
+Exit 2 takes precedence over exit 1. Findings from files that were analyzed are still printed. Analysis errors are written to stderr, one line per file:
+
+```text
+smellcheck: error: failed to analyze <path>: <reason>
+```
+
+`--format json` keeps stdout as a JSON array of smell findings. Analysis errors are not inserted into that array. A successful clean scan is exit 0 with stdout `[]` (JSON) or the text summary, and with empty stderr. A failed analysis is exit 2 even when stdout is `[]`.
+
+The default `--fail-on` is `error`, so smellcheck exits 0 unless an error-severity finding is detected or a file could not be analyzed. Usage errors (bad flags, missing paths) still exit 1.
 
 ## Flag Interactions
 
