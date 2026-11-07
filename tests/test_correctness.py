@@ -1321,3 +1321,100 @@ def test_attribute_call_follows_re_export(tmp_path: Path) -> None:
     messages = [f.message for f in findings if f.pattern == "SC703"]
     assert any("run -> fetch -> time.sleep" in message for message in messages)
 
+
+
+# ---------------------------------------------------------------------------
+# 22. Exported attributes are not submodule edges
+# ---------------------------------------------------------------------------
+
+
+def test_exported_attribute_is_not_a_submodule_cycle(tmp_path: Path) -> None:
+    """``from pkg import b`` does not load ``pkg.b`` when ``pkg`` sets ``b``."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("b = 1\n", encoding="utf-8")
+    (pkg / "a.py").write_text("from pkg import b\n", encoding="utf-8")
+    (pkg / "b.py").write_text("import pkg.a\n", encoding="utf-8")
+    assert _sc503([pkg]) == []
+
+
+def test_relative_exported_attribute_is_not_a_submodule_cycle(tmp_path: Path) -> None:
+    """``from . import b`` is an attribute lookup when the package binds ``b``."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("b = 1\n", encoding="utf-8")
+    (pkg / "a.py").write_text("from . import b\n", encoding="utf-8")
+    (pkg / "b.py").write_text("import pkg.a\n", encoding="utf-8")
+    assert _sc503([pkg]) == []
+
+
+def test_unbound_package_name_still_imports_submodule(tmp_path: Path) -> None:
+    """A function-local assignment does not hide the submodule of the same name."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text(
+        "def make():\n    b = 1\n    return b\n",
+        encoding="utf-8",
+    )
+    (pkg / "a.py").write_text("from pkg import b\n", encoding="utf-8")
+    (pkg / "b.py").write_text("import pkg.a\n", encoding="utf-8")
+    findings = _sc503([pkg])
+    assert len(findings) == 1
+    assert "pkg.a" in findings[0].message
+    assert "pkg.b" in findings[0].message
+
+
+# ---------------------------------------------------------------------------
+# 23. Changed-file scans keep the loaded config root
+# ---------------------------------------------------------------------------
+
+
+def test_changed_files_keep_the_loaded_config_root(tmp_path: Path) -> None:
+    """A nested pyproject must not rebase ignores onto a changed-file subset."""
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.smellcheck]\nper-file-ignores = {"tests/*" = ["SC701"]}\n',
+        encoding="utf-8",
+    )
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "pyproject.toml").write_text(
+        '[project]\nname = "nested"\n',
+        encoding="utf-8",
+    )
+    smelly = "def demo(items=[]):\n    return items\n"
+    _write_py(tmp_path, smelly, name="nested/tests/test_x.py")
+    _write_py(tmp_path, smelly, name="tests/test_kept.py")
+    (tmp_path / "clean.py").write_text("x = 1\n", encoding="utf-8")
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", *args], cwd=tmp_path, check=True, capture_output=True, text=True
+        )
+
+    git("init")
+    git("config", "user.email", "test@test.com")
+    git("config", "user.name", "Test")
+    (tmp_path / "nested" / "tests" / "test_x.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_kept.py").write_text("x = 1\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "initial")
+    (tmp_path / "nested" / "tests" / "test_x.py").write_text(smelly, encoding="utf-8")
+    (tmp_path / "tests" / "test_kept.py").write_text(smelly, encoding="utf-8")
+
+    changed = _run_cli(
+        ".",
+        "--changed-only",
+        "--no-cache",
+        "--select",
+        "SC701",
+        "--format",
+        "json",
+        cwd=tmp_path,
+    )
+    full = _run_cli(
+        ".", "--no-cache", "--select", "SC701", "--format", "json", cwd=tmp_path
+    )
+    assert changed.returncode == full.returncode == 1
+    changed_names = sorted(Path(item["file"]).name for item in json.loads(changed.stdout))
+    full_names = sorted(Path(item["file"]).name for item in json.loads(full.stdout))
+    assert changed_names == full_names == ["test_x.py"]

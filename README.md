@@ -129,7 +129,7 @@ cache-dir = ".smellcheck-cache"        # cache directory (default: .smellcheck-c
 
 CLI flags override config values. **Precedence:** CLI flags > environment variables > pyproject.toml > defaults.
 
-`per-file-ignores` patterns are matched against each file's path relative to the directory that contains the `pyproject.toml` providing the setting. `tests/*` therefore ignores `tests/test_sample.py` whether you pass `tests`, an absolute path, or run smellcheck from another working directory. Absolute patterns are matched against the absolute path. Files that do not match stay unsuppressed.
+`per-file-ignores` patterns are matched against each file's path relative to the directory that contains the `pyproject.toml` providing the setting. `tests/*` therefore ignores `tests/test_sample.py` whether you pass `tests`, an absolute path, or run smellcheck from another working directory. Absolute patterns are matched against the absolute path. Files that do not match stay unsuppressed. `--diff` and `--changed-only` keep that same config directory: a nested `pyproject.toml` next to a changed file does not rebase the patterns.
 
 ### Environment variables
 

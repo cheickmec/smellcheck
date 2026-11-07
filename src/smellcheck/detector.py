@@ -886,7 +886,17 @@ def _find_pyproject(start: Path) -> Path | None:
 def load_config(target: Path) -> dict:
     """Load ``[tool.smellcheck]`` from the nearest ``pyproject.toml``.
 
-    Returns an empty dict when the section is absent or TOML cannot be parsed.
+    The returned dict includes ``_config_root``, the directory of the file
+    that was loaded. Per-file patterns stay relative to that directory when
+    a later scan only includes a subset of paths.
+
+    Args:
+        target: File or directory to search upward from.
+
+    Returns:
+        Smellcheck settings. Empty when no ``pyproject.toml`` is found or
+        the file cannot be parsed. ``_config_root`` is set whenever a config
+        file was read.
     """
     pyproject = _find_pyproject(target)
     if pyproject is None or tomllib is None:
@@ -898,6 +908,9 @@ def load_config(target: Path) -> dict:
     config = dict(data.get("tool", {}).get("smellcheck", {}))
     if "extends" in config:
         config = _resolve_extends(config, pyproject.resolve())
+    # Patterns stay relative to the file that was loaded. A later --diff
+    # file list must not rebase them onto a nested pyproject.toml.
+    config["_config_root"] = str(pyproject.resolve().parent)
     return config
 
 
@@ -1080,7 +1093,7 @@ def _resolve_extends(
 # ---------------------------------------------------------------------------
 
 _DEFAULT_CACHE_DIR: Final = ".smellcheck-cache"
-_CACHE_VERSION: Final = 7
+_CACHE_VERSION: Final = 8
 
 
 def _cache_file_id(path: Path) -> str:
@@ -1247,6 +1260,7 @@ def _serialize_file_data(fd: FileData) -> dict:
             name: [level, module, func]
             for name, (level, module, func) in fd.import_bindings.items()
         },
+        "exported_names": sorted(fd.exported_names),
         "scoped_import_bindings": {
             scope: {
                 name: [level, module, func]
@@ -1363,6 +1377,7 @@ def _deserialize_file_data(d: dict) -> FileData:
         async_module_functions=set(d.get("async_module_functions", [])),
         async_methods=set(d.get("async_methods", [])),
         import_bindings=_coerce_import_bindings(d.get("import_bindings", {})),
+        exported_names={str(name) for name in d.get("exported_names", [])},
         scoped_import_bindings=_coerce_scoped_import_bindings(
             d.get("scoped_import_bindings", {})
         ),
@@ -2521,6 +2536,78 @@ def _extract_module_import_lines(tree: ast.Module) -> dict[str, int]:
     return lines
 
 
+def _binding_targets(node: ast.AST) -> list[str]:
+    """Return names stored by an assignment target.
+
+    Args:
+        node: Target of an assignment, loop, or ``with`` item.
+
+    Returns:
+        Bound names. Attribute and subscript targets bind nothing here.
+    """
+    if isinstance(node, ast.Name):
+        return [node.id]
+    if isinstance(node, (ast.Tuple, ast.List)):
+        names: list[str] = []
+        for elt in node.elts:
+            names.extend(_binding_targets(elt))
+        return names
+    if isinstance(node, ast.Starred):
+        return _binding_targets(node.value)
+    return []
+
+
+def _extract_exported_names(tree: ast.Module) -> set[str]:
+    """Return names bound on the module after it is imported.
+
+    ``from package import name`` uses an existing attribute and does not
+    load a same-named submodule. Function, lambda, and class bodies are
+    separate scopes, so only their definition names count. Assignments
+    inside those bodies do not.
+
+    Args:
+        tree: Parsed module.
+
+    Returns:
+        Names present as module attributes. A bare annotation or a
+        ``from module import *`` does not contribute names.
+    """
+    names: set[str] = set()
+
+    def walk(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(child.name)
+                continue
+            if isinstance(child, ast.Lambda):
+                continue
+            if isinstance(child, ast.Assign):
+                for target in child.targets:
+                    names.update(_binding_targets(target))
+            elif isinstance(child, ast.AnnAssign) and child.value is not None:
+                names.update(_binding_targets(child.target))
+            elif isinstance(child, ast.TypeAlias):
+                names.update(_binding_targets(child.name))
+            elif isinstance(child, ast.Import):
+                for alias in child.names:
+                    names.add(alias.asname or alias.name.split(".")[0])
+            elif isinstance(child, ast.ImportFrom):
+                for alias in child.names:
+                    if alias.name == "*":
+                        continue
+                    names.add(alias.asname or alias.name)
+            elif isinstance(child, (ast.For, ast.AsyncFor)):
+                names.update(_binding_targets(child.target))
+            elif isinstance(child, (ast.With, ast.AsyncWith)):
+                for item in child.items:
+                    if item.optional_vars is not None:
+                        names.update(_binding_targets(item.optional_vars))
+            walk(child)
+
+    walk(tree)
+    return names
+
+
 def _iter_scoped_functions(node: ast.AST) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDef]:
     """Yield functions and methods that are not nested inside another function.
 
@@ -2659,6 +2746,9 @@ class FileData:
     async_methods: set[str] = field(default_factory=set)
     # local name -> (level, module, imported function or "")
     import_bindings: dict[str, tuple[int, str, str]] = field(default_factory=dict)
+    # Names bound on this module at import time. A package attribute with
+    # one of these names is not also a submodule import.
+    exported_names: set[str] = field(default_factory=set)
     # "stem:function" -> {local name -> binding} for imports made inside that
     # callable, so function-local imports are resolved before module-level ones.
     scoped_import_bindings: dict[str, dict[str, tuple[int, str, str]]] = field(
@@ -4353,6 +4443,7 @@ def scan_file(
     detector.finalize()
     detector.file_data.imports = _extract_imports(tree)
     detector.file_data.import_bindings = _extract_import_bindings(tree)
+    detector.file_data.exported_names = _extract_exported_names(tree)
     detector.file_data.module_import_lines = _extract_module_import_lines(tree)
     detector.file_data.scoped_import_bindings = _extract_scoped_import_bindings(
         tree, Path(filepath).stem
@@ -4701,17 +4792,23 @@ def _resolve_imported_modules(
     *,
     is_package: bool,
     known: set[str],
+    exports: dict[str, set[str]] | None = None,
 ) -> set[str]:
     """Resolve one import to scanned modules.
 
     Only full module paths that exist in *known* are returned. A basename
     token is never matched against a sibling file in the importer's directory.
+    An imported name that the package already binds is an attribute, not a
+    submodule: ``from pkg import b`` does not load ``pkg.b`` when ``pkg``
+    sets ``b``.
 
     Args:
         importer: Dotted name of the importing module.
         ref: ``(level, module, names)`` import record.
         is_package: True when *importer* is a package initializer.
         known: Dotted names of modules in this scan.
+        exports: Package module name to names bound in that package.
+            None treats every imported name as a possible submodule.
 
     Returns:
         Known modules loaded by this import, including a parent package when
@@ -4737,7 +4834,10 @@ def _resolve_imported_modules(
             prefix = ".".join(parts[:index])
             if prefix in known:
                 targets.add(prefix)
+        package_exports = exports.get(base, set()) if exports is not None else set()
         for name in names:
+            if name in package_exports:
+                continue
             submodule = f"{base}.{name}" if base else name
             if submodule in known:
                 targets.add(submodule)
@@ -4771,6 +4871,11 @@ def _build_import_graph(
         modules that were part of the scan.
     """
     known = set(reverse_map)
+    exports = {
+        module_map[fd.filepath]: set(fd.exported_names)
+        for fd in all_data
+        if Path(fd.filepath).name == "__init__.py"
+    }
     import_graph: dict[str, set[str]] = defaultdict(set)
     for fd in all_data:
         src_module = module_map[fd.filepath]
@@ -4778,7 +4883,11 @@ def _build_import_graph(
         is_package = Path(fd.filepath).name == "__init__.py"
         for ref in _coerce_imports(fd.imports):
             found = _resolve_imported_modules(
-                src_module, ref, is_package=is_package, known=known
+                src_module,
+                ref,
+                is_package=is_package,
+                known=known,
+                exports=exports,
             )
             for target in found:
                 if target == src_module:

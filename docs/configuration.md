@@ -68,7 +68,7 @@ When extending configs:
 |-----|----------|
 | `select` | Override (child replaces parent entirely) |
 | `ignore` | Union (deduplicated, base order preserved, new codes appended) |
-| `per-file-ignores` | Deep merge (same glob unions codes). Patterns are relative to the directory containing the config file. |
+| `per-file-ignores` | Deep merge (same glob unions codes). Patterns are relative to the directory containing the config file that was loaded. `--diff` does not rebase them onto a nested config. |
 | `fail-on`, `format`, `baseline`, `cache`, `cache-dir` | Override (child wins) |
 | `extends` | Consumed and stripped |
 
