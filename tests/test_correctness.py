@@ -1793,3 +1793,51 @@ def test_method_still_captures_enclosing_parameter(tmp_path: Path) -> None:
         """,
     )
     assert _patterns(scan_path(path), "SC208") == []
+
+
+def test_inherited_method_is_indirect_blocking(tmp_path: Path) -> None:
+    """``self.fetch()`` in a subclass traces ``Base.fetch``."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        class Base:
+            def fetch(self):
+                time.sleep(1)
+
+        class Child(Base):
+            async def run(self):
+                self.fetch()
+        """,
+        name="a.py",
+    )
+    _write_py(tmp_path, "x = 1\n", name="b.py")
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    messages = [
+        finding.message
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
+
+def test_method_default_sees_class_local_binding(tmp_path: Path) -> None:
+    """A method default sees a class attribute, not an outer parameter."""
+    path = _write_py(
+        tmp_path,
+        """\
+        def outer(value):
+            def inner():
+                class C:
+                    value = 1
+
+                    def m(self, x=value):
+                        return x
+                return C
+            return inner
+        """,
+    )
+    findings = _patterns(scan_path(path), "SC208")
+    assert len(findings) == 1
+    assert "value" in findings[0].message

@@ -2239,8 +2239,16 @@ def _names_used_in_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set
             for stmt in current.body:
                 bound = _stmt_bound_names(stmt)
                 if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    # Methods close over the enclosing function, not class attributes.
-                    walk(stmt, shadowed)
+                    # Defaults and decorators see class bindings. The method
+                    # body closes over the enclosing function instead.
+                    _note_signature_uses(stmt, shadowed | class_locals, walk)
+                    inner = (
+                        shadowed
+                        | _names_bound_here(stmt)
+                        | _globals_declared_here(stmt)
+                    )
+                    for body_stmt in stmt.body:
+                        walk(body_stmt, inner)
                 else:
                     walk(stmt, shadowed | class_locals | bound)
                 class_locals.update(bound)
@@ -6060,9 +6068,10 @@ def _imported_class_method(
         return None
     if not _class_binding_wins(target, class_name):
         return None
-    if not _class_defines_method(target, class_name, method):
+    scope = _defining_method_scope(target, class_name, method)
+    if not scope:
         return None
-    return target, _scope_suffix(class_name, method), True
+    return target, scope, True
 
 
 def _qualified_class_method(
@@ -6101,9 +6110,10 @@ def _qualified_class_method(
         return None
     if not _class_binding_wins(target, class_name):
         return None
-    if not _class_defines_method(target, class_name, method):
+    scope = _defining_method_scope(target, class_name, method)
+    if not scope:
         return None
-    return target, _scope_suffix(class_name, method), True
+    return target, scope, True
 
 
 def _class_of_scope(scope_key: str) -> str:
@@ -6119,6 +6129,37 @@ def _class_of_scope(scope_key: str) -> str:
     if "." not in suffix:
         return ""
     return suffix.rsplit(".", 1)[0]
+
+
+
+def _defining_method_scope(fd: FileData, class_name: str, method: str) -> str:
+    """Return the ``Class.method`` key for the class that defines *method*.
+
+    Args:
+        fd: File containing the class hierarchy.
+        class_name: Class used at the call, which may inherit the method.
+        method: Method name.
+
+    Returns:
+        Scope suffix of the defining class, or empty when no class body in
+        this file defines *method*.
+    """
+    seen: set[str] = set()
+    current = class_name
+    while current and current not in seen:
+        seen.add(current)
+        if _class_defines_method(fd, current, method):
+            return _scope_suffix(current, method)
+        bases = fd.class_bases.get(current, [])
+        current = next(
+            (
+                base
+                for base in bases
+                if base in fd.class_bases or base in fd.class_names
+            ),
+            "",
+        )
+    return ""
 
 
 def _class_binding_wins(fd: FileData, name: str) -> bool:
@@ -6187,10 +6228,14 @@ def _resolve_call_target(
     scoped = caller.scoped_import_bindings.get(scope_key, {}) if scope_key else {}
 
     if kind == "attr" and receiver in ("self", "cls"):
+        class_name = _class_of_scope(scope_key)
+        if class_name:
+            scope = _defining_method_scope(caller, class_name, name)
+            if scope:
+                return caller, scope, True
+            return None
         if name in caller.defined_functions:
-            class_name = _class_of_scope(scope_key)
-            qualified = _scope_suffix(class_name, name)
-            return caller, qualified, True
+            return caller, name, True
         return None
 
     if kind == "attr":
@@ -6202,8 +6247,9 @@ def _resolve_call_target(
             and receiver not in scoped
             and _class_binding_wins(caller, receiver)
         ):
-            if _class_defines_method(caller, receiver, name):
-                return caller, _scope_suffix(receiver, name), True
+            scope = _defining_method_scope(caller, receiver, name)
+            if scope:
+                return caller, scope, True
             return None
         path = _resolve_attr_module(
             caller, receiver, module_map, reverse_map, scoped, by_path
