@@ -1093,7 +1093,7 @@ def _resolve_extends(
 # ---------------------------------------------------------------------------
 
 _DEFAULT_CACHE_DIR: Final = ".smellcheck-cache"
-_CACHE_VERSION: Final = 9
+_CACHE_VERSION: Final = 10
 
 
 def _cache_file_id(path: Path) -> str:
@@ -1256,6 +1256,7 @@ def _serialize_file_data(fd: FileData) -> dict:
         "module_level_functions": sorted(fd.module_level_functions),
         "async_module_functions": sorted(fd.async_module_functions),
         "async_methods": sorted(fd.async_methods),
+        "async_scope_names": sorted(fd.async_scope_names),
         "import_bindings": {
             name: [level, module, func]
             for name, (level, module, func) in fd.import_bindings.items()
@@ -1273,6 +1274,10 @@ def _serialize_file_data(fd: FileData) -> dict:
         },
         "module_import_lines": fd.module_import_lines,
         "module_function_lines": fd.module_function_lines,
+        "module_rebindings": {
+            name: [line, rhs]
+            for name, (line, rhs) in fd.module_rebindings.items()
+        },
         "function_call_sites": {
             key: [list(site) for site in sites]
             for key, sites in fd.function_call_sites.items()
@@ -1379,6 +1384,7 @@ def _deserialize_file_data(d: dict) -> FileData:
         module_level_functions=set(d.get("module_level_functions", [])),
         async_module_functions=set(d.get("async_module_functions", [])),
         async_methods=set(d.get("async_methods", [])),
+        async_scope_names=set(d.get("async_scope_names", [])),
         import_bindings=_coerce_import_bindings(d.get("import_bindings", {})),
         exported_names={str(name) for name in d.get("exported_names", [])},
         scoped_import_bindings=_coerce_scoped_import_bindings(
@@ -1394,6 +1400,11 @@ def _deserialize_file_data(d: dict) -> FileData:
         },
         module_function_lines={
             str(k): int(v) for k, v in d.get("module_function_lines", {}).items()
+        },
+        module_rebindings={
+            str(name): (int(value[0]), str(value[1]))
+            for name, value in d.get("module_rebindings", {}).items()
+            if isinstance(value, (list, tuple)) and len(value) == 2
         },
         function_call_sites=_coerce_call_sites(d.get("function_call_sites", {})),
         function_calls_map={k: set(v) for k, v in d.get("function_calls_map", {}).items()},
@@ -1513,7 +1524,50 @@ def _retarget_file_data(file_data: FileData, filepath: str) -> FileData:
         (filepath, *sig[1:]) if sig and sig[0] == old else sig
         for sig in file_data.func_signatures
     ]
+    old_stem = Path(old).stem
+    new_stem = Path(filepath).stem
+    if old_stem != new_stem:
+        file_data.scoped_import_bindings = _retarget_scope_keys(
+            file_data.scoped_import_bindings, old_stem, new_stem
+        )
+        file_data.scope_local_names = _retarget_scope_keys(
+            file_data.scope_local_names, old_stem, new_stem
+        )
+        file_data.function_call_sites = _retarget_scope_keys(
+            file_data.function_call_sites, old_stem, new_stem
+        )
+        file_data.function_calls_map = _retarget_scope_keys(
+            file_data.function_calls_map, old_stem, new_stem
+        )
+        file_data.function_call_lines_map = _retarget_scope_keys(
+            file_data.function_call_lines_map, old_stem, new_stem
+        )
+        file_data.blocking_calls_in_functions = _retarget_scope_keys(
+            file_data.blocking_calls_in_functions, old_stem, new_stem
+        )
     return file_data
+
+
+def _retarget_scope_keys(
+    mapping: dict[str, object], old_stem: str, new_stem: str
+) -> dict[str, object]:
+    """Rename ``stem:scope`` keys when a cached file is scanned under a new name.
+
+    Args:
+        mapping: Map whose keys may start with ``old_stem:``.
+        old_stem: Filename stem stored in the cache entry.
+        new_stem: Filename stem of the path being scanned.
+
+    Returns:
+        The same values under the new stem. Unrelated keys are unchanged.
+    """
+    prefix = f"{old_stem}:"
+    renamed: dict[str, object] = {}
+    for key, value in mapping.items():
+        if key.startswith(prefix):
+            key = f"{new_stem}:{key[len(prefix):]}"
+        renamed[key] = value
+    return renamed
 
 
 # ---------------------------------------------------------------------------
@@ -2181,8 +2235,15 @@ def _names_used_in_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set
                 walk(base, shadowed)
             for keyword in current.keywords:
                 walk(keyword.value, shadowed)
+            class_locals: set[str] = set()
             for stmt in current.body:
-                walk(stmt, shadowed)
+                bound = _stmt_bound_names(stmt)
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # Methods close over the enclosing function, not class attributes.
+                    walk(stmt, shadowed)
+                else:
+                    walk(stmt, shadowed | class_locals | bound)
+                class_locals.update(bound)
             return
         if isinstance(current, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
             _walk_comprehension(current.generators, [current.elt], shadowed, walk)
@@ -2623,27 +2684,86 @@ def _extract_exported_names(tree: ast.Module) -> set[str]:
     return names
 
 
-def _iter_scoped_functions(node: ast.AST) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDef]:
+def _scope_suffix(class_name: str, func_name: str) -> str:
+    """Return the callable suffix used in ``stem:suffix`` maps.
+
+    Args:
+        class_name: Enclosing class, or empty for a module-level function.
+        func_name: Function or method name.
+
+    Returns:
+        ``Class.method`` or ``function``.
+    """
+    if class_name:
+        return f"{class_name}.{func_name}"
+    return func_name
+
+
+def _stmt_bound_names(stmt: ast.AST) -> set[str]:
+    """Return names bound by one statement in the scope that contains it.
+
+    Args:
+        stmt: Statement to inspect.
+
+    Returns:
+        Names that statement binds. Nested function bodies are not inspected.
+    """
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {stmt.name}
+    if isinstance(stmt, ast.Assign):
+        names: set[str] = set()
+        for target in stmt.targets:
+            names.update(_binding_targets(target))
+        return names
+    if isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+        return set(_binding_targets(stmt.target))
+    if isinstance(stmt, ast.Import):
+        return {
+            alias.asname or alias.name.split(".")[0]
+            for alias in stmt.names
+        }
+    if isinstance(stmt, ast.ImportFrom):
+        return {
+            alias.asname or alias.name
+            for alias in stmt.names
+            if alias.name != "*"
+        }
+    if isinstance(stmt, (ast.For, ast.AsyncFor)):
+        return set(_binding_targets(stmt.target))
+    if isinstance(stmt, (ast.With, ast.AsyncWith)):
+        names = set()
+        for item in stmt.items:
+            if item.optional_vars is not None:
+                names.update(_binding_targets(item.optional_vars))
+        return names
+    return set()
+
+
+def _iter_scoped_functions(
+    node: ast.AST, class_name: str = ""
+) -> Iterator[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]]:
     """Yield functions and methods that are not nested inside another function.
 
-    These are the callables whose calls are recorded under a ``stem:name`` key
-    by the detector: module-level functions (including ones guarded by ``if``
-    or ``try``) and class methods. Nested functions are skipped because their
-    calls are not attributed to a scope of their own.
+    These are the callables whose calls are recorded under a ``stem:suffix``
+    key. Methods include the class name so two classes can both define ``run``
+    without sharing import bindings. Nested functions are skipped.
 
     Args:
         node: AST node to walk.
+        class_name: Enclosing class, or empty at module level.
 
     Yields:
-        Function and method definition nodes.
+        ``(class name, definition)``. The class name is empty for functions.
     """
     for child in ast.iter_child_nodes(node):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            yield child
+            yield class_name, child
         elif isinstance(child, ast.Lambda):
             continue
+        elif isinstance(child, ast.ClassDef):
+            yield from _iter_scoped_functions(child, child.name)
         else:
-            yield from _iter_scoped_functions(child)
+            yield from _iter_scoped_functions(child, class_name)
 
 
 def _extract_scoped_import_bindings(
@@ -2653,8 +2773,7 @@ def _extract_scoped_import_bindings(
 
     Function- and method-local imports must resolve before module-level ones,
     and imports in one callable must not leak into another. The scope key
-    matches the ``stem:function`` key used by the call-site maps, so class
-    methods are collected alongside module-level functions.
+    matches the call-site maps: ``stem:function`` or ``stem:Class.method``.
 
     Args:
         tree: Parsed module.
@@ -2664,13 +2783,13 @@ def _extract_scoped_import_bindings(
         ``scope key -> {local name -> (level, module, function)}``.
     """
     scoped: dict[str, dict[str, tuple[int, str, str]]] = {}
-    for node in _iter_scoped_functions(tree):
+    for class_name, node in _iter_scoped_functions(tree):
         bindings: dict[str, tuple[int, str, str]] = {}
         for child in _walk_skip_nested_scopes(node):
             if isinstance(child, (ast.Import, ast.ImportFrom)):
                 _remember_import_binding(bindings, child)
         if bindings:
-            scoped[f"{stem}:{node.name}"] = bindings
+            scoped[f"{stem}:{_scope_suffix(class_name, node.name)}"] = bindings
     return scoped
 
 
@@ -2759,6 +2878,9 @@ class FileData:
     module_level_functions: set[str] = field(default_factory=set)
     async_module_functions: set[str] = field(default_factory=set)
     async_methods: set[str] = field(default_factory=set)
+    # ``function`` or ``Class.method`` suffixes for async callables. Scope maps
+    # use these so same-named methods do not share a key.
+    async_scope_names: set[str] = field(default_factory=set)
     # local name -> (level, module, imported function or "")
     import_bindings: dict[str, tuple[int, str, str]] = field(default_factory=dict)
     # Names bound on this module at import time. A package attribute with
@@ -2776,6 +2898,9 @@ class FileData:
     module_import_lines: dict[str, int] = field(default_factory=dict)
     # name -> line of a module-level function definition
     module_function_lines: dict[str, int] = field(default_factory=dict)
+    # name -> (line, simple RHS name or "") for a module assignment that
+    # replaces an earlier import or definition.
+    module_rebindings: dict[str, tuple[int, str]] = field(default_factory=dict)
     # qualified name -> [(kind, name, receiver, line)]
     function_call_sites: dict[str, list[tuple[str, str, str, int]]] = field(
         default_factory=dict
@@ -3972,7 +4097,11 @@ class SmellDetector(ast.NodeVisitor):
         if len(self._func_stack) > 1:
             return
         module_stem = Path(self.filepath).stem
-        qname = f"{module_stem}:{node.name}"
+        class_name = self._class_stack[-1].name if self._class_stack else ""
+        scope = _scope_suffix(class_name, node.name)
+        qname = f"{module_stem}:{scope}"
+        if isinstance(node, ast.AsyncFunctionDef):
+            self.file_data.async_scope_names.add(scope)
         callees: set[str] = set()
         call_lines: dict[str, int] = {}  # bare callee name -> first call-site line
         blocking: list[tuple[str, str]] = []
@@ -4463,6 +4592,7 @@ def scan_file(
     detector.file_data.imports = _extract_imports(tree)
     detector.file_data.import_bindings = _extract_import_bindings(tree)
     detector.file_data.exported_names = _extract_exported_names(tree)
+    detector.file_data.module_rebindings = _extract_module_rebindings(tree)
     detector.file_data.module_import_lines = _extract_module_import_lines(tree)
     detector.file_data.scoped_import_bindings = _extract_scoped_import_bindings(
         tree, Path(filepath).stem
@@ -5746,10 +5876,40 @@ def _resolve_attr_module(
     return path
 
 
+def _extract_module_rebindings(tree: ast.Module) -> dict[str, tuple[int, str]]:
+    """Return module assignments that can replace an imported name.
+
+    Only assignments in the module body count. Class and function bodies are
+    separate scopes. The right-hand side is kept when it is a bare name so
+    ``helper = nonblocking`` can resolve to that function.
+
+    Args:
+        tree: Parsed module.
+
+    Returns:
+        ``name -> (line, rhs name or "")``. Later assignments replace earlier ones.
+    """
+    found: dict[str, tuple[int, str]] = {}
+
+    def walk(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            if isinstance(child, ast.Assign):
+                rhs = child.value.id if isinstance(child.value, ast.Name) else ""
+                for target in child.targets:
+                    for name in _binding_targets(target):
+                        found[name] = (child.lineno, rhs)
+            walk(child)
+
+    walk(tree)
+    return found
+
+
 def _module_name_binding(fd: FileData, name: str) -> str:
     """Return the winning module-scope binding kind for *name*.
 
-    A module-level definition and an import of the same name are ordered by
+    A definition, import, and assignment of the same name are ordered by
     source line: whichever runs last at import time is the binding that a call
     resolves to.
 
@@ -5758,22 +5918,18 @@ def _module_name_binding(fd: FileData, name: str) -> str:
         name: Local name being resolved.
 
     Returns:
-        ``"def"``, ``"import"``, or ``""`` when the name is not bound here.
+        ``"def"``, ``"import"``, ``"assign"``, or ``""`` when unbound.
     """
-    has_def = name in fd.module_level_functions
-    has_import = name in fd.import_bindings
-    if has_def and has_import:
-        return (
-            "def"
-            if fd.module_function_lines.get(name, -1)
-            > fd.module_import_lines.get(name, -1)
-            else "import"
-        )
-    if has_def:
-        return "def"
-    if has_import:
-        return "import"
-    return ""
+    candidates: list[tuple[int, str]] = []
+    if name in fd.module_level_functions:
+        candidates.append((fd.module_function_lines.get(name, -1), "def"))
+    if name in fd.import_bindings:
+        candidates.append((fd.module_import_lines.get(name, -1), "import"))
+    if name in fd.module_rebindings:
+        candidates.append((fd.module_rebindings[name][0], "assign"))
+    if not candidates:
+        return ""
+    return max(candidates)[1]
 
 
 def _follow_name_binding(
@@ -5906,7 +6062,7 @@ def _imported_class_method(
         return None
     if not _class_defines_method(target, class_name, method):
         return None
-    return target, method, True
+    return target, _scope_suffix(class_name, method), True
 
 
 def _qualified_class_method(
@@ -5947,7 +6103,22 @@ def _qualified_class_method(
         return None
     if not _class_defines_method(target, class_name, method):
         return None
-    return target, method, True
+    return target, _scope_suffix(class_name, method), True
+
+
+def _class_of_scope(scope_key: str) -> str:
+    """Return the class encoded in a ``stem:Class.method`` scope key.
+
+    Args:
+        scope_key: Call-site map key. Empty when the caller is unknown.
+
+    Returns:
+        Class name, or empty for a module-level function.
+    """
+    suffix = scope_key.split(":", 1)[-1] if scope_key else ""
+    if "." not in suffix:
+        return ""
+    return suffix.rsplit(".", 1)[0]
 
 
 def _class_binding_wins(fd: FileData, name: str) -> bool:
@@ -6017,7 +6188,9 @@ def _resolve_call_target(
 
     if kind == "attr" and receiver in ("self", "cls"):
         if name in caller.defined_functions:
-            return caller, name, True
+            class_name = _class_of_scope(scope_key)
+            qualified = _scope_suffix(class_name, name)
+            return caller, qualified, True
         return None
 
     if kind == "attr":
@@ -6030,7 +6203,7 @@ def _resolve_call_target(
             and _class_binding_wins(caller, receiver)
         ):
             if _class_defines_method(caller, receiver, name):
-                return caller, name, True
+                return caller, _scope_suffix(receiver, name), True
             return None
         path = _resolve_attr_module(
             caller, receiver, module_map, reverse_map, scoped, by_path
@@ -6062,6 +6235,23 @@ def _resolve_call_target(
     kind = _module_name_binding(caller, name)
     if kind == "def":
         return caller, name, False
+    if kind == "assign":
+        rhs = caller.module_rebindings.get(name, (-1, ""))[1]
+        if not rhs or rhs == name:
+            return None
+        rhs_kind = _module_name_binding(caller, rhs)
+        if rhs_kind == "def":
+            return caller, rhs, False
+        if rhs_kind == "import":
+            return _follow_name_binding(
+                caller,
+                caller.import_bindings[rhs],
+                by_path,
+                module_map,
+                reverse_map,
+                {(caller.filepath, rhs)},
+            )
+        return None
     if kind == "import":
         return _follow_name_binding(
             caller,
@@ -6074,20 +6264,33 @@ def _resolve_call_target(
     return None
 
 
+def _bare_callable(name: str) -> str:
+    """Return the function name without a ``Class.`` prefix.
+
+    Args:
+        name: Scope suffix, either ``function`` or ``Class.method``.
+
+    Returns:
+        The bare callable name used in messages.
+    """
+    return name.rsplit(".", 1)[-1]
+
+
 def _callee_is_async(target: FileData, name: str, is_method: bool) -> bool:
     """Return whether the resolved callable is an async function.
 
     Args:
         target: File that defines the callable.
-        name: Bare function or method name.
-        is_method: True when the call was ``self.name()`` or ``cls.name()``.
+        name: Scope suffix, ``function`` or ``Class.method``.
+        is_method: True when the call was an attribute of a class or instance.
 
     Returns:
         True when that specific definition is async.
     """
+    bare = _bare_callable(name)
     if is_method:
-        return name in target.async_methods
-    return name in target.async_module_functions
+        return bare in target.async_methods
+    return bare in target.async_module_functions
 
 
 def _detect_indirect_blocking(all_data: list[FileData]) -> list[Finding]:
@@ -6116,8 +6319,9 @@ def _detect_indirect_blocking(all_data: list[FileData]) -> list[Finding]:
         visited.add(key)
         qname = _call_qname(fd.filepath, name)
         blockers = fd.blocking_calls_in_functions.get(qname)
+        label = _bare_callable(name)
         if blockers:
-            return [name, blockers[0][1]]
+            return [label, blockers[0][1]]
         for kind, callee, receiver, _line in fd.function_call_sites.get(qname, []):
             resolved = _resolve_call_target(
                 fd, kind, callee, receiver, by_path, module_map, reverse_map, qname
@@ -6129,13 +6333,13 @@ def _detect_indirect_blocking(all_data: list[FileData]) -> list[Finding]:
                 continue
             chain = trace(target, target_name, depth + 1, visited.copy())
             if chain is not None:
-                return [name, *chain]
+                return [label, *chain]
         return None
 
     for fd in all_data:
-        async_names = fd.async_module_functions | fd.async_methods
-        for fname in async_names:
-            qname = _call_qname(fd.filepath, fname)
+        for scope in fd.async_scope_names:
+            qname = _call_qname(fd.filepath, scope)
+            fname = _bare_callable(scope)
             reported: set[tuple[str, int]] = set()
             for kind, callee, receiver, line in fd.function_call_sites.get(qname, []):
                 resolved = _resolve_call_target(

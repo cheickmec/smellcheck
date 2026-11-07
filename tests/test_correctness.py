@@ -1655,3 +1655,141 @@ def test_module_qualified_class_method_is_indirect_blocking(tmp_path: Path) -> N
         if finding.pattern == "SC703" and "Indirect blocking" in finding.message
     ]
     assert any("run -> fetch -> time.sleep" in message for message in messages)
+
+
+def test_cache_retarget_keeps_scope_keys_for_symlinks(tmp_path: Path) -> None:
+    """A cached file opened through a different symlink name still reports SC703."""
+    source = (
+        "import time\n\n"
+        "def helper():\n"
+        "    time.sleep(1)\n\n"
+        "async def run():\n"
+        "    helper()\n"
+    )
+    real = tmp_path / "real.py"
+    real.write_text(source, encoding="utf-8")
+    cache = tmp_path / "cache"
+    scan_paths([real], cache_dir=cache, use_cache=True)
+    alias = tmp_path / "alias.py"
+    alias.symlink_to(real)
+    cached = scan_paths([alias], cache_dir=cache, use_cache=True)
+    fresh = scan_paths([alias], cache_dir=cache, use_cache=False)
+    def chains(findings: list) -> list[str]:
+        return [
+            finding.message
+            for finding in findings
+            if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+        ]
+    assert chains(cached) == chains(fresh)
+    assert any("run -> helper -> time.sleep" in message for message in chains(cached))
+
+
+def test_assignment_replaces_imported_callable(tmp_path: Path) -> None:
+    """``helper = nonblocking`` replaces ``from b import fetch as helper``."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        def fetch():
+            time.sleep(1)
+        """,
+        name="b.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        from b import fetch as helper
+
+        async def nonblocking():
+            return 1
+
+        helper = nonblocking
+
+        async def run():
+            await helper()
+        """,
+        name="a.py",
+    )
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    indirect = [
+        finding
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert indirect == []
+
+
+def test_same_named_methods_do_not_share_import_bindings(tmp_path: Path) -> None:
+    """A local import in ``A.run`` does not apply to ``B.run``."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        def fetch():
+            time.sleep(1)
+        """,
+        name="b.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        async def helper():
+            return 1
+
+        class A:
+            async def run(self):
+                from b import fetch as helper
+                await helper()
+
+        class B:
+            async def run(self):
+                await helper()
+        """,
+        name="a.py",
+    )
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    indirect = [
+        finding
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert len(indirect) == 1
+    assert "run -> fetch -> time.sleep" in indirect[0].message
+
+
+def test_class_body_assignment_is_not_a_closure_capture(tmp_path: Path) -> None:
+    """A class attribute does not count as a use of an outer parameter."""
+    path = _write_py(
+        tmp_path,
+        """\
+        def outer(value):
+            def inner():
+                class Box:
+                    value = 1
+                    result = value
+                return Box
+            return inner
+        """,
+    )
+    findings = _patterns(scan_path(path), "SC208")
+    assert len(findings) == 1
+    assert "value" in findings[0].message
+
+
+def test_method_still_captures_enclosing_parameter(tmp_path: Path) -> None:
+    """A method body still closes over the enclosing function, not class attributes."""
+    path = _write_py(
+        tmp_path,
+        """\
+        def outer(value):
+            def inner():
+                class Box:
+                    def method(self):
+                        return value
+                return Box
+            return inner
+        """,
+    )
+    assert _patterns(scan_path(path), "SC208") == []
