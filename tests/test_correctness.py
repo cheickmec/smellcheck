@@ -2035,3 +2035,105 @@ def test_class_comprehension_uses_enclosing_parameter(tmp_path: Path) -> None:
         """,
     )
     assert _patterns(scan_path(path), "SC208") == []
+
+
+def test_module_qualified_base_is_indirect_blocking(tmp_path: Path) -> None:
+    """``class Child(b.Base)`` traces ``b.Base.fetch``."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        class Base:
+            def fetch(self):
+                time.sleep(1)
+        """,
+        name="b.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        import b
+
+        class Child(b.Base):
+            async def run(self):
+                self.fetch()
+        """,
+        name="a.py",
+    )
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    messages = [
+        finding.message
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert any("run -> fetch -> time.sleep" in message for message in messages)
+
+
+def test_rebound_module_alias_is_not_attribute_blocking(tmp_path: Path) -> None:
+    """``helper = Safe()`` stops ``helper.fetch()`` from following ``import b as helper``."""
+    _write_py(
+        tmp_path,
+        """\
+        import time
+
+        def fetch():
+            time.sleep(1)
+        """,
+        name="b.py",
+    )
+    _write_py(
+        tmp_path,
+        """\
+        import b as helper
+
+        class Safe:
+            @staticmethod
+            async def fetch():
+                return 1
+
+        helper = Safe()
+
+        async def run():
+            await helper.fetch()
+        """,
+        name="a.py",
+    )
+    findings = scan_paths([tmp_path / "a.py", tmp_path / "b.py"], use_cache=False)
+    indirect = [
+        finding
+        for finding in findings
+        if finding.pattern == "SC703" and "Indirect blocking" in finding.message
+    ]
+    assert indirect == []
+
+
+def test_nested_class_body_uses_enclosing_parameter(tmp_path: Path) -> None:
+    """A nested class body reads the function parameter, not the outer class attribute."""
+    path = _write_py(
+        tmp_path,
+        """\
+        def outer(value):
+            def inner():
+                class C:
+                    value = 1
+
+                    class D:
+                        result = value
+                return C.D
+            return inner
+        """,
+    )
+    assert _patterns(scan_path(path), "SC208") == []
+
+
+def test_symlink_keeps_its_import_name(tmp_path: Path) -> None:
+    """``alias.py`` symlinked to ``real.py`` is the module ``alias``."""
+    _write_py(tmp_path, "import alias\n", name="a.py")
+    real = _write_py(tmp_path, "import a\n", name="real.py")
+    alias = tmp_path / "alias.py"
+    alias.symlink_to(real)
+    findings = _sc503([tmp_path / "a.py", alias])
+    assert len(findings) == 1
+    assert "alias" in findings[0].message
+    assert "a" in findings[0].message

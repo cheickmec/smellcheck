@@ -2214,6 +2214,9 @@ def _names_used_in_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set
     # Comprehensions in a class body close over the enclosing function, not
     # the class namespace. None means "use the shadowed set of this walk".
     class_comp_scope: list[set[str] | None] = [None]
+    # Body of a nested class also closes over the function, not the outer class.
+    # None means the class was entered from a function, so its argument is that scope.
+    nested_class_body: list[set[str] | None] = [None]
 
     def walk(current: ast.AST, shadowed: set[str]) -> None:
         if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
@@ -2232,6 +2235,10 @@ def _names_used_in_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set
                 walk(stmt, inner)
             return
         if isinstance(current, ast.ClassDef):
+            # Decorators and bases run in the scope that contains this class,
+            # which may be an enclosing class. The body does not: a nested
+            # class closes over the function, not the outer class namespace.
+            body_scope = nested_class_body[0] if nested_class_body[0] is not None else shadowed
             for deco in current.decorator_list:
                 walk(deco, shadowed)
             for base in current.bases:
@@ -2240,16 +2247,18 @@ def _names_used_in_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set
                 walk(keyword.value, shadowed)
             class_locals: set[str] = set()
             saved_comp = class_comp_scope[0]
+            saved_body = nested_class_body[0]
             if saved_comp is None:
-                class_comp_scope[0] = shadowed
+                class_comp_scope[0] = body_scope
+            nested_class_body[0] = body_scope
             for stmt in current.body:
                 bound = _stmt_bound_names(stmt)
                 if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     # Defaults and decorators see class bindings. The method
                     # body and its comprehensions close over the function.
-                    _note_signature_uses(stmt, shadowed | class_locals, walk)
+                    _note_signature_uses(stmt, body_scope | class_locals, walk)
                     inner = (
-                        shadowed
+                        body_scope
                         | _names_bound_here(stmt)
                         | _globals_declared_here(stmt)
                     )
@@ -2258,10 +2267,13 @@ def _names_used_in_function(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set
                     for body_stmt in stmt.body:
                         walk(body_stmt, inner)
                     class_comp_scope[0] = method_comp
+                elif isinstance(stmt, ast.ClassDef):
+                    walk(stmt, body_scope | class_locals)
                 else:
-                    walk(stmt, shadowed | class_locals | bound)
+                    walk(stmt, body_scope | class_locals | bound)
                 class_locals.update(bound)
             class_comp_scope[0] = saved_comp
+            nested_class_body[0] = saved_body
             return
         if isinstance(current, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
             scope = class_comp_scope[0] if class_comp_scope[0] is not None else shadowed
@@ -4164,8 +4176,9 @@ class SmellDetector(ast.NodeVisitor):
         """Collect detailed class information for Tier 2/3 analysis."""
         bases = []
         for base in node.bases:
-            if isinstance(base, ast.Name):
-                bases.append(base.id)
+            dotted = _dotted_name(base)
+            if dotted:
+                bases.append(dotted)
             elif isinstance(base, ast.Attribute):
                 bases.append(base.attr)
 
@@ -4856,6 +4869,10 @@ def _module_name_for(
         resolved = path.resolve()
     except OSError:
         resolved = path
+    # Directory structure follows the real file so it lines up with the
+    # resolved fallback root. The leaf name is the scanned name: alias.py
+    # symlinked to real.py is imported as alias.
+    leaf = path.name
     directory = resolved.parent
     package_dirs: list[str] = []
     while (directory / "__init__.py").is_file():
@@ -4870,17 +4887,17 @@ def _module_name_for(
     try:
         rel = resolved.relative_to(root)
     except (OSError, ValueError):
-        if resolved.name == "__init__.py":
-            return resolved.parent.name or resolved.stem
-        parent = resolved.parent.name
-        return f"{parent}.{resolved.stem}" if parent else resolved.stem
+        if leaf == "__init__.py":
+            return path.parent.name or path.stem
+        parent = path.parent.name
+        return f"{parent}.{Path(leaf).stem}" if parent else Path(leaf).stem
     parts = list(rel.parts)
     if not parts:
-        return resolved.stem
-    if parts[-1] == "__init__.py":
+        return Path(leaf).stem
+    if parts[-1] == "__init__.py" or leaf == "__init__.py":
         parts = parts[:-1]
     else:
-        parts[-1] = Path(parts[-1]).stem
+        parts[-1] = Path(leaf).stem
     if not parts:
         return resolved.parent.name or "__init__"
     return ".".join(parts)
@@ -5872,7 +5889,13 @@ def _resolve_attr_module(
     if not parts:
         return None
     root, tail = parts[0], parts[1:]
-    binding = scoped.get(root) or caller.import_bindings.get(root)
+    if root in scoped:
+        binding = scoped[root]
+    elif _module_name_binding(caller, root) == "import":
+        binding = caller.import_bindings.get(root)
+    else:
+        # A later assignment replaced the import. helper.fetch() is not b.fetch().
+        return None
     if binding is None:
         return None
     level, module, func = binding
@@ -6246,8 +6269,19 @@ def _defining_method(
         ``(defining file, Class.method)`` or None.
     """
     def resolve(owner: FileData, name: str) -> tuple[str, str] | None:
-        if name in owner.class_bases or name in owner.class_names:
+        if "." not in name and (name in owner.class_bases or name in owner.class_names):
             return (owner.filepath, name)
+        if "." in name:
+            module_receiver, _, class_attr = name.rpartition(".")
+            path = _resolve_attr_module(
+                owner, module_receiver, module_map, reverse_map, {}, by_path
+            )
+            target = by_path.get(path or "")
+            if target is None:
+                return None
+            if class_attr in target.class_bases or class_attr in target.class_names:
+                return (target.filepath, class_attr)
+            return None
         if _module_name_binding(owner, name) != "import":
             return None
         binding = owner.import_bindings.get(name)
