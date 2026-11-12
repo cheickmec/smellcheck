@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1](https://github.com/cheickmec/smellcheck/compare/v0.4.0...v0.4.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* correct scan identity, cross-file analysis, and failed-file reporting ([69660d9](https://github.com/cheickmec/smellcheck/commit/69660d94242c80acb9c337120896e5a68250b793))
+
 ## [0.4.0](https://github.com/cheickmec/smellcheck/compare/v0.3.10...v0.4.0) (2026-11-02)
 
 
