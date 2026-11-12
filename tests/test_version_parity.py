@@ -5,6 +5,8 @@ All of these must agree:
   - .release-please-manifest.json  "."
   - .claude-plugin/marketplace.json  metadata.version + plugins[0].version
   - plugins/python-refactoring/.claude-plugin/plugin.json  version
+  - .cursor-plugin/marketplace.json  metadata.version + plugins[0].version
+  - plugins/python-refactoring/.cursor-plugin/plugin.json  version
   - smellcheck.__version__  (importlib.metadata, derived from pyproject.toml)
 """
 
@@ -79,7 +81,23 @@ def _collect() -> list[tuple[str, str]]:
     pj = _read_json("plugins/python-refactoring/.claude-plugin/plugin.json")
     sources.append(("plugin.json version", pj["version"]))
 
-    # 6. Runtime __version__
+    # 6. Cursor marketplace.json — metadata.version and plugins[0].version
+    cursor_mp = _read_json(".cursor-plugin/marketplace.json")
+    sources.append(
+        ("cursor marketplace.json metadata.version", cursor_mp["metadata"]["version"])
+    )
+    sources.append(
+        (
+            "cursor marketplace.json plugins[0].version",
+            cursor_mp["plugins"][0]["version"],
+        )
+    )
+
+    # 7. Cursor plugin.json — version
+    cursor_plugin = _read_json("plugins/python-refactoring/.cursor-plugin/plugin.json")
+    sources.append(("cursor plugin.json version", cursor_plugin["version"]))
+
+    # 8. Runtime __version__
     from smellcheck import __version__
     sources.append(("smellcheck.__version__", __version__))
 
@@ -107,6 +125,24 @@ def test_all_versions_match(version_sources):
         f"Version drift detected! Canonical version is {CANONICAL_VERSION}.\n"
         + "\n".join(f"  {label}: {ver}" for label, ver in mismatches)
     )
+
+
+def test_release_please_bumps_cursor_manifests():
+    """release-please must bump every Cursor version field with the package."""
+    config = _read_json("release-please-config.json")
+    extra = config["packages"]["."]["extra-files"]
+    bumps = {
+        (item["path"], item["jsonpath"])
+        for item in extra
+        if isinstance(item, dict) and item.get("type") == "json"
+    }
+    expected = {
+        (".cursor-plugin/marketplace.json", "$.metadata.version"),
+        (".cursor-plugin/marketplace.json", "$.plugins[0].version"),
+        ("plugins/python-refactoring/.cursor-plugin/plugin.json", "$.version"),
+    }
+    missing = expected - bumps
+    assert not missing, f"release-please extra-files missing {missing}"
 
 
 def test_at_least_four_sources_checked(version_sources):
